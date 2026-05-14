@@ -145,11 +145,29 @@ class DQNAgent_Optimized:
             return random.choice(valid_actions)
         return best
 
+    # ── buffer diagnostics ───────────────────────────────────
+    def get_buffer_stats(self, current_step: int) -> tuple:
+        """Returns (buffer_size, current_beta, mean_leaf_priority)."""
+        size = len(self.memory)
+        beta = min(1.0, self.per_beta_start + (PER_BETA_END - self.per_beta_start) * (
+            current_step / max(1, self.total_training_steps)))
+        mean_priority = 0.0
+        if PER_ENABLED and hasattr(self.memory, 'tree'):
+            tree = self.memory.tree
+            if tree.n_entries > 0:
+                leaf_start = tree.capacity - 1
+                leaf_prio  = tree.tree[leaf_start:leaf_start + tree.n_entries]
+                nz = leaf_prio[leaf_prio > 0]
+                if len(nz) > 0:
+                    mean_priority = float(nz.mean())
+        return size, float(beta), mean_priority
+
     # ── learning step ────────────────────────────────────────
-    def replay(self, current_step: int = 0) -> float:
-        """Sample a mini-batch and update both Q- and V-networks."""
+    def replay(self, current_step: int = 0) -> tuple:
+        """Sample a mini-batch and update both Q- and V-networks.
+        Returns (q_loss, v_loss, grad_norm). All zero when buffer not full."""
         if len(self.memory) < self.batch_size:
-            return 0.0
+            return 0.0, 0.0, 0.0
 
         # Sample
         if PER_ENABLED:
@@ -157,7 +175,7 @@ class DQNAgent_Optimized:
                 current_step / max(1, self.total_training_steps))
             indices, minibatch, is_weights = self.memory.sample(self.batch_size, beta)
             if len(minibatch) < self.batch_size // 2:
-                return 0.0
+                return 0.0, 0.0, 0.0
             is_w = torch.from_numpy(is_weights).float().to(self.device).unsqueeze(1)
         else:
             minibatch = random.sample(self.memory, self.batch_size)
@@ -183,7 +201,7 @@ class DQNAgent_Optimized:
 
         self.optimizer.zero_grad()
         q_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)
+        q_grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)
         self.optimizer.step()
 
         # ── V-Network update ─────────────────────────────────
@@ -211,7 +229,7 @@ class DQNAgent_Optimized:
         if self.scheduler:        self.scheduler.step()
         if self.value_scheduler:  self.value_scheduler.step()
 
-        return q_loss.item()
+        return q_loss.item(), v_loss.item(), q_grad_norm.item()
 
     # ── epsilon decay ────────────────────────────────────────
     def decay_epsilon(self, current_step: int):
