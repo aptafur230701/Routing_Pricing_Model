@@ -69,12 +69,12 @@ def main():
         print(f"State size      : {state_size}  (2 + {NUM_NODES} visited + 2 step)")
         print(f"Training episodes: {num_episodes}")
 
-        # 2. Optuna
-        print("\n--- Optuna (75 trials) ---")
+        # 2. Optuna (Cambiar a 75 trials luego de hacer pruebas)
+        print("\n--- Optuna (5 trials) ---")
         best_params = run_optuna(
             time_matrix, reward_matrix_penalized,
             noise_sigma, NUM_NODES, epsilon_decay_steps,
-            n_trials=75,
+            n_trials=5,
         )
 
         # 3. Full training

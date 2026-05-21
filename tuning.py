@@ -24,10 +24,10 @@ from environment import sample_stochastic_reward
 
 
 def _get_optuna_episodes(num_nodes: int) -> int:
-    if num_nodes <= 10:  return 5000
-    if num_nodes <= 15:  return 5500
-    if num_nodes <= 20:  return 6000
-    return 7500
+    if num_nodes <= 10:  return 500 #Cambiar a 5000 luego de hacer pruebas
+    if num_nodes <= 15:  return 750 #Cambiar a 5500 luego de hacer pruebas
+    if num_nodes <= 20:  return 1000 #Cambiar a 6000 luego de hacer pruebas
+    return 1500
 
 
 def _run_trial_episode(agent, start_node, time_matrix, reward_matrix_penalized,
@@ -97,7 +97,7 @@ def run_optuna(
     noise_sigma:  float,
     num_nodes:    int,
     epsilon_decay_steps: int,
-    n_trials:     int = 75,
+    n_trials:     int = 5, #Cambiar a 75 luego de hacer pruebas
 ) -> dict:
     """Run Optuna study and return best hyperparameters."""
 

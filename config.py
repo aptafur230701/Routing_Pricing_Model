@@ -29,7 +29,7 @@ LR_SCHEDULE       = "cosine"     # "cosine" | "constant"
 EPSILON_SCHEDULE  = "cosine"     # "cosine" | "linear"
 
 # ── Environment constraints ───────────────────────────────────
-DURATION_LIMIT      = 60.0
+DURATION_LIMIT      = 70.0
 DURATION_TOLERANCE  = 0.10
 MIN_DURATION        = DURATION_LIMIT * (1 - DURATION_TOLERANCE)
 MAX_DURATION        = DURATION_LIMIT * (1 + DURATION_TOLERANCE)
