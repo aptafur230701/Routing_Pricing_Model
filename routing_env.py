@@ -125,7 +125,7 @@ class RoutingEnv(gym.Env):
         self._step_count: int = None
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Ciclo de vida del entorno (API pública Gymnasium)
+    # Ciclo de vida del entorno 
     # ─────────────────────────────────────────────────────────────────────────
 
     def reset(self, seed: int = None, options: dict = None):

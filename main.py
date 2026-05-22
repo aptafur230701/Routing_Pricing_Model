@@ -3,7 +3,7 @@ main.py
 =======
 Entry point. Orchestrates the full pipeline:
 
-  1. Load data          (environment.py)
+  1. Load data          (problem_data.py)
   2. Optuna tuning      (tuning.py)
   3. Full training      (training.py)
   4. Evaluation         (evaluation.py)
@@ -70,11 +70,11 @@ def main():
         print(f"Training episodes: {num_episodes}")
 
         # 2. Optuna
-        print("\n--- Optuna (75 trials) ---")
+        print("\n--- Optuna (5 trials) ---")
         best_params = run_optuna(
             time_matrix, reward_matrix_penalized,
             noise_sigma, NUM_NODES, epsilon_decay_steps,
-            n_trials=75,
+            n_trials=5,
         )
 
         # 3. Full training
