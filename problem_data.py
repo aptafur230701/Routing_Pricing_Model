@@ -50,7 +50,6 @@ def load_matrices(num_nodes: int):
 
     rate_matrix     = pd.read_csv(os.path.join(cwd, f"rate_q2_{REGION}_{TRUCK_TYPE}{DATE_SUFFIX}.csv"),    header=None)
     time_matrix_raw = pd.read_csv(os.path.join(cwd, f"duration_{REGION}.csv"),                            header=None)
-    markov_matrix   = pd.read_csv(os.path.join(cwd, f"prob_{REGION}_{TRUCK_TYPE}{DATE_SUFFIX}.csv"),      header=None)
     loads_matrix    = pd.read_csv(os.path.join(cwd, f"load_av_{REGION}_{TRUCK_TYPE}{DATE_SUFFIX}.csv"),   header=None)
     distance_matrix = pd.read_csv(os.path.join(cwd, f"distance_{REGION}.csv"),                            header=None)
     diesel_matrix   = pd.read_csv(os.path.join(cwd, f"diesel_{REGION}{DATE_SUFFIX}.csv"),                 header=None)

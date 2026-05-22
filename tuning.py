@@ -36,12 +36,12 @@ from routing_env import RoutingEnv
 def _get_optuna_episodes(num_nodes: int) -> int:
     """Número de episodios de entrenamiento por trial según el tamaño del grafo."""
     if num_nodes <= 10:
-        return 5000
+        return 50 #luego cambiar a 5000
     if num_nodes <= 15:
-        return 5500
+        return 55 #luego cambiar a 5500
     if num_nodes <= 20:
-        return 6000
-    return 7500
+        return 60 #luego cambiar a 6000
+    return 75 #luego cambiar a 7500
 
 
 def _mask_to_invalid(action_mask: np.ndarray) -> set:
