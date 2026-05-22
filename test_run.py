@@ -18,10 +18,10 @@ from config import (
     REWARD_SCALE_FACTOR, RETURN_SUCCESS_BONUS, TIME_VIOLATION_PENALTY,
     INCOMPLETE_PENALTY, STOCHASTIC_MODE,
 )
-from environment import load_matrices
+from problem_data import load_matrices
 from state import get_state_size, build_state
 from agent import DQNAgent_Optimized
-from environment import sample_stochastic_reward
+from problem_data import sample_stochastic_reward
 from evaluation import generate_optimal_route
 
 NUM_NODES     = 5

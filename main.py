@@ -29,7 +29,7 @@ from config import (
     get_episodes_per_node, get_buffer_size,
 )
 from state import get_state_size
-from environment import load_matrices
+from problem_data import load_matrices
 from tuning import run_optuna
 from training import run_training
 from evaluation import (

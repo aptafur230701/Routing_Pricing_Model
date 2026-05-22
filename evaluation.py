@@ -22,7 +22,7 @@ from config import (
     N_EVAL_EPISODES, NOISE_FRACTION,
 )
 from state import build_state
-from environment import sample_stochastic_reward
+from problem_data import sample_stochastic_reward
 from Solvers import (
     solve_mip, solve_heuristic, solve_2opt_heuristic,
     solve_LNS_metaheuristic, solve_genetic_algorithm,

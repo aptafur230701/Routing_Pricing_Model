@@ -39,7 +39,7 @@ from config import (
     TIME_VIOLATION_PENALTY,
 )
 from state import get_state_size, build_state
-from environment import sample_stochastic_reward
+from problem_data import sample_stochastic_reward
 
 
 class RoutingEnv(gym.Env):
