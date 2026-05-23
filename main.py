@@ -57,8 +57,10 @@ def main():
         set_seeds(SEED)
 
         # 1. Data
-        time_matrix, reward_matrix, reward_matrix_penalized, noise_sigma = \
+        time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, noise_sigma = \
             load_matrices(NUM_NODES)
+
+
 
         state_size         = get_state_size(NUM_NODES)
         episodes_per_node  = get_episodes_per_node(NUM_NODES)
@@ -70,29 +72,30 @@ def main():
         print(f"Training episodes: {num_episodes}")
 
         # 2. Optuna
-        print("\n--- Optuna (5 trials) ---")
+        print("\n--- Optuna (30 trials) ---")
         best_params = run_optuna(
-            time_matrix, reward_matrix_penalized,
+            time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
             noise_sigma, NUM_NODES, epsilon_decay_steps,
-            n_trials=5,
+            n_trials=30,
         )
 
         # 3. Full training
         set_seeds(SEED)
         t_train = time.time()
         agent, ep_rewards, ep_losses = run_training(
-            best_params, time_matrix, reward_matrix_penalized,
-            noise_sigma, NUM_NODES,
+            best_params, time_matrix, rate_stack, loads_stack,
+            distance_arr, diesel_arr, noise_sigma, NUM_NODES,
         )
         train_time = time.time() - t_train
         print(f"Training time: {train_time:.1f} s")
 
         agent.save(os.path.join(cwd, f"agent_checkpoint_{NUM_NODES}nodes.pt"))
 
-        # 4. Solver comparison
+        # 4. Solver comparison (samplea un día por nodo de inicio)
         results_df, timing = run_solver_comparison(
-            agent, time_matrix, reward_matrix,
-            reward_matrix_penalized, noise_sigma, NUM_NODES,
+            agent, time_matrix,
+            rate_stack, loads_stack, distance_arr, diesel_arr,
+            noise_sigma, NUM_NODES,
         )
 
         # 5. Print summary

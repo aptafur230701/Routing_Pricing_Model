@@ -874,7 +874,7 @@ def _crossover_routes(route1, route2, start_node, time_m, reward_m, max_d):
     2. Fill remaining nodes from parent2 in order
     Respects max 6 nodes (5 steps) constraint
     """
-    if len(route1) < 3 or len(route2) < 3:
+    if len(route1) < 4 or len(route2) < 4:
         return route1 if np.random.rand() < 0.5 else route2
     
     # Extract intermediate nodes (exclude start/end)

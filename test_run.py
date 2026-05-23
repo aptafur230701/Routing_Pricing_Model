@@ -18,10 +18,9 @@ from config import (
     REWARD_SCALE_FACTOR, RETURN_SUCCESS_BONUS, TIME_VIOLATION_PENALTY,
     INCOMPLETE_PENALTY, STOCHASTIC_MODE,
 )
-from problem_data import load_matrices
+from problem_data import load_matrices, build_day_matrices, sample_stochastic_reward
 from state import get_state_size, build_state
 from agent import DQNAgent_Optimized
-from problem_data import sample_stochastic_reward
 from evaluation import generate_optimal_route
 
 NUM_NODES     = 5
@@ -42,12 +41,18 @@ def run_test():
     set_seeds(SEED)
 
     # ── 1. Load data ──────────────────────────────────────────
-    time_matrix, reward_matrix, reward_matrix_penalized, noise_sigma = \
+    time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, noise_sigma = \
         load_matrices(NUM_NODES)
+
+    # Smoke test usa el día 0 como snapshot fijo
+    reward_matrix, reward_matrix_penalized = build_day_matrices(
+        rate_stack[0], loads_stack[0], distance_arr, diesel_arr
+    )
 
     print(f"  time_matrix shape   : {time_matrix.shape}")
     print(f"  reward_matrix shape : {reward_matrix.shape}")
     print(f"  noise_sigma         : {noise_sigma:.2f}")
+    print(f"  rate_stack days     : {rate_stack.shape[0]}")
 
     # ── 2. Build agent with simple default params ─────────────
     state_size = get_state_size(NUM_NODES)

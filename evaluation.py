@@ -22,7 +22,7 @@ from config import (
     N_EVAL_EPISODES, NOISE_FRACTION,
 )
 from state import build_state
-from problem_data import sample_stochastic_reward
+from problem_data import sample_stochastic_reward, build_day_matrices
 from Solvers import (
     solve_mip, solve_heuristic, solve_2opt_heuristic,
     solve_LNS_metaheuristic, solve_genetic_algorithm,
@@ -56,6 +56,19 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
             for v in visited_inter:
                 if 0 <= v < len(q):
                     q[v] = -np.inf
+
+            # Time-feasibility lookahead: mask intermediate nodes from which
+            # return to start_node would exceed max_duration.
+            for j in range(num_nodes):
+                if j != start_node and q[j] != -np.inf:
+                    t_to_j = (time_matrix.iloc[current_node, j]
+                              if hasattr(time_matrix, 'iloc')
+                              else float(time_matrix[current_node][j]))
+                    t_j_to_start = (time_matrix.iloc[j, start_node]
+                                    if hasattr(time_matrix, 'iloc')
+                                    else float(time_matrix[j][start_node]))
+                    if time_elapsed + t_to_j + t_j_to_start > max_duration + 1e-6:
+                        q[j] = -np.inf
 
             next_node = int(np.argmax(q))
 
@@ -166,20 +179,32 @@ def evaluate_stochastic(agent, start_node, time_matrix, reward_matrix_penalized,
 
 
 # ── Solver comparison ─────────────────────────────────────────
-def run_solver_comparison(agent, time_matrix, reward_matrix,
-                           reward_matrix_penalized, noise_sigma, num_nodes):
-    """Run DRL + all benchmark solvers for every start node."""
+def run_solver_comparison(agent, time_matrix,
+                           rate_stack, loads_stack, distance_arr, diesel_arr,
+                           noise_sigma, num_nodes):
+    """Run DRL + all benchmark solvers for every start node.
+
+    Para cada nodo de inicio se samplea un día aleatorio del stack histórico
+    de modo que DRL y todos los solvers benchmark compiten sobre la misma
+    realización de mercado (comparación equitativa).
+    """
     results           = []
     mip_times         = []
     heuristic_times   = []
     drl_times         = []
     heuristic2_times  = []
     lns_times         = []
+    num_days          = rate_stack.shape[0]
 
     print("\n--- Solver Comparison ---")
     for s in range(num_nodes):
-        print(f"\nStart node {s}")
-        row = {'Start Node': s}
+        # Samplear un día para este nodo de inicio
+        day_idx = np.random.randint(0, num_days)
+        reward_matrix, reward_matrix_penalized = build_day_matrices(
+            rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+        )
+        print(f"\nStart node {s} | day {day_idx}")
+        row = {'Start Node': s, 'Day Index': day_idx}
 
         # DRL
         t0 = time.time()

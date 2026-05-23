@@ -331,6 +331,12 @@ class RoutingEnv(gym.Env):
           de aprendizaje original (el agente aprende a retornar via reward shaping).
         - 1 para todos los demás nodos no visitados.
 
+        Nota: la factibilidad temporal NO se aplica aquí (durante entrenamiento).
+        El agente aprende a evitar callejones temporales mediante INCOMPLETE_PENALTY
+        y TIME_VIOLATION_PENALTY. Aplicar la máscara de factibilidad en entrenamiento
+        resulta demasiado restrictiva y aumenta el gap vs MIP. El lookahead temporal
+        se aplica únicamente en el rollout greedy de evaluación (evaluation.py).
+
         Retorna
         -------
         np.ndarray[int8, shape=(num_nodes,)]
@@ -351,6 +357,14 @@ class RoutingEnv(gym.Env):
     # ─────────────────────────────────────────────────────────────────────────
     # API pública auxiliar
     # ─────────────────────────────────────────────────────────────────────────
+
+    def update_reward_matrix(self, reward_matrix_penalized) -> None:
+        """Replace the reward matrix before the next episode.
+
+        Call this before env.reset() to inject a new day's reward snapshot.
+        Compatible with pd.DataFrame and np.ndarray (same as the constructor).
+        """
+        self._reward_matrix_penalized = reward_matrix_penalized
 
     def get_valid_actions(self) -> list:
         """

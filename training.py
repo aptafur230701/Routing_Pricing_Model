@@ -29,6 +29,7 @@ from config import (
 from state import get_state_size
 from agent import DQNAgent_Optimized
 from routing_env import RoutingEnv
+from problem_data import build_day_matrices
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -74,22 +75,32 @@ def _mask_to_invalid(action_mask: np.ndarray) -> set:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_training(
-    best_params: dict,
+    best_params:  dict,
     time_matrix,
-    reward_matrix_penalized,
-    noise_sigma: float,
-    num_nodes: int,
+    rate_stack:   np.ndarray,
+    loads_stack:  np.ndarray,
+    distance_arr: np.ndarray,
+    diesel_arr:   np.ndarray,
+    noise_sigma:  float,
+    num_nodes:    int,
 ) -> tuple:
     """
     Construye un agente DQN nuevo con los hiperparámetros óptimos y lo entrena.
 
+    En cada episodio se samplea un día aleatorio de los últimos 90 días para
+    que el agente aprenda de variabilidad histórica en lugar de memorizar una
+    distribución de recompensas única.
+
     Parámetros
     ----------
-    best_params             : dict — hiperparámetros de Optuna.
-    time_matrix             : pd.DataFrame | np.ndarray — tiempos entre nodos.
-    reward_matrix_penalized : pd.DataFrame | np.ndarray — recompensas penalizadas.
-    noise_sigma             : float — sigma del ruido estocástico.
-    num_nodes               : int  — tamaño del grafo.
+    best_params  : dict — hiperparámetros de Optuna.
+    time_matrix  : pd.DataFrame — tiempos entre nodos.
+    rate_stack   : np.ndarray [num_days, num_nodes, num_nodes] — tarifas históricas.
+    loads_stack  : np.ndarray [num_days, num_nodes, num_nodes] — cargas históricas.
+    distance_arr : np.ndarray [num_nodes, num_nodes] — distancias entre nodos.
+    diesel_arr   : np.ndarray [num_nodes, num_nodes] — precios de combustible.
+    noise_sigma  : float — sigma del ruido estocástico.
+    num_nodes    : int  — tamaño del grafo.
 
     Retorna
     -------
@@ -97,10 +108,11 @@ def run_training(
     episode_rewards : list[float] — recompensa acumulada por episodio.
     episode_losses  : list[float] — pérdida promedio por episodio.
     """
-    state_size = get_state_size(num_nodes)
+    state_size        = get_state_size(num_nodes)
     episodes_per_node = get_episodes_per_node(num_nodes)
-    num_episodes = episodes_per_node * num_nodes
-    total_steps_est = num_episodes * MAX_STEPS_PER_EPISODE
+    num_episodes      = episodes_per_node * num_nodes
+    total_steps_est   = num_episodes * MAX_STEPS_PER_EPISODE
+    num_days          = rate_stack.shape[0]
 
     # ── Construcción del agente ───────────────────────────────────
     agent = DQNAgent_Optimized(
@@ -124,10 +136,13 @@ def run_training(
         grad_clip=best_params["grad_clip"],
     )
 
-    # ── Construcción del entorno Gymnasium ───────────────────────
+    # ── Construcción del entorno Gymnasium (día 0 como placeholder) ─
+    _, reward_matrix_penalized_init = build_day_matrices(
+        rate_stack[0], loads_stack[0], distance_arr, diesel_arr
+    )
     env = RoutingEnv(
         time_matrix=time_matrix,
-        reward_matrix_penalized=reward_matrix_penalized,
+        reward_matrix_penalized=reward_matrix_penalized_init,
         noise_sigma=noise_sigma,
         num_nodes=num_nodes,
         max_steps=MAX_STEPS_PER_EPISODE,
@@ -150,6 +165,13 @@ def run_training(
             episode, num_episodes, num_nodes, node_ep_counts
         )
         node_ep_counts[start_node] += 1
+
+        # Samplear un día aleatorio e inyectar su matriz de recompensas
+        day_idx = np.random.randint(0, num_days)
+        _, rm_pen = build_day_matrices(
+            rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+        )
+        env.update_reward_matrix(rm_pen)
 
         # Inicializar episodio vía API estándar de Gymnasium
         obs, info = env.reset(options={"start_node": start_node})

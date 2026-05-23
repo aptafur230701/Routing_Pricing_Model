@@ -8,10 +8,7 @@ Nothing is imported from other project modules here.
 import torch
 
 # ── Problem identity ──────────────────────────────────────────
-TRUCK_TYPE      = "VAN"
 MPG             = 6.5
-DATE_SUFFIX     = "_2024-12-09"
-REGION          = "west"
 
 # ── Stochastic reward ────────────────────────────────────────
 STOCHASTIC_MODE  = True

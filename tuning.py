@@ -27,6 +27,7 @@ from config import (
 from state import get_state_size
 from agent import DQNAgent_Optimized
 from routing_env import RoutingEnv
+from problem_data import build_day_matrices
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,12 +37,12 @@ from routing_env import RoutingEnv
 def _get_optuna_episodes(num_nodes: int) -> int:
     """Número de episodios de entrenamiento por trial según el tamaño del grafo."""
     if num_nodes <= 10:
-        return 50 #luego cambiar a 5000
+        return 500 #luego cambiar a 5000
     if num_nodes <= 15:
-        return 55 #luego cambiar a 5500
+        return 550 #luego cambiar a 5500
     if num_nodes <= 20:
-        return 60 #luego cambiar a 6000
-    return 75 #luego cambiar a 7500
+        return 600 #luego cambiar a 6000
+    return 750 #luego cambiar a 7500
 
 
 def _mask_to_invalid(action_mask: np.ndarray) -> set:
@@ -154,28 +155,32 @@ def _run_validation_episode(
 
 def run_optuna(
     time_matrix,
-    reward_matrix_penalized,
-    noise_sigma: float,
-    num_nodes: int,
+    rate_stack:          np.ndarray,
+    loads_stack:         np.ndarray,
+    distance_arr:        np.ndarray,
+    diesel_arr:          np.ndarray,
+    noise_sigma:         float,
+    num_nodes:           int,
     epsilon_decay_steps: int,
-    n_trials: int = 75,
+    n_trials:            int = 75,
 ) -> dict:
     """
     Ejecuta el estudio de Optuna y retorna los mejores hiperparámetros.
 
-    El espacio de búsqueda (learning_rate, gamma, epsilon, buffer_size, etc.)
-    y la arquitectura de redes (h1..h4) son idénticos al diseño original.
-    NO se modifica DuelingQNetwork, ValueNetwork, PrioritizedReplayBuffer
-    ni la lógica Double DQN.
+    En cada episodio de cada trial se samplea un día aleatorio del stack
+    histórico para evaluar los hiperparámetros con variabilidad real.
 
     Parámetros
     ----------
-    time_matrix             : pd.DataFrame | np.ndarray — tiempos entre nodos.
-    reward_matrix_penalized : pd.DataFrame | np.ndarray — recompensas penalizadas.
-    noise_sigma             : float — sigma del ruido estocástico.
-    num_nodes               : int   — tamaño del grafo.
-    epsilon_decay_steps     : int   — referencia para el espacio de búsqueda de epsilon.
-    n_trials                : int   — número de trials de Optuna.
+    time_matrix         : pd.DataFrame — tiempos entre nodos.
+    rate_stack          : np.ndarray [num_days, num_nodes, num_nodes].
+    loads_stack         : np.ndarray [num_days, num_nodes, num_nodes].
+    distance_arr        : np.ndarray [num_nodes, num_nodes].
+    diesel_arr          : np.ndarray [num_nodes, num_nodes].
+    noise_sigma         : float — sigma del ruido estocástico.
+    num_nodes           : int   — tamaño del grafo.
+    epsilon_decay_steps : int   — referencia para el espacio de búsqueda de epsilon.
+    n_trials            : int   — número de trials de Optuna.
 
     Retorna
     -------
@@ -242,10 +247,14 @@ def run_optuna(
             grad_clip=grad_clip,
         )
 
-        # ── Entorno Gymnasium del trial ───────────────────────────
+        # ── Entorno Gymnasium del trial (día 0 como placeholder) ─
+        num_days = rate_stack.shape[0]
+        _, rm_pen_init = build_day_matrices(
+            rate_stack[0], loads_stack[0], distance_arr, diesel_arr
+        )
         env = RoutingEnv(
             time_matrix=time_matrix,
-            reward_matrix_penalized=reward_matrix_penalized,
+            reward_matrix_penalized=rm_pen_init,
             noise_sigma=noise_sigma,
             num_nodes=num_nodes,
             max_steps=MAX_STEPS_PER_EPISODE,
@@ -255,6 +264,11 @@ def run_optuna(
         # ── Fase de entrenamiento del trial ───────────────────────
         total_steps = 0
         for ep in range(num_episodes):
+            day_idx = np.random.randint(0, num_days)
+            _, rm_pen = build_day_matrices(
+                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+            )
+            env.update_reward_matrix(rm_pen)
             start_node = ep % num_nodes
             total_steps, _ = _run_trial_episode(
                 agent, env, start_node, tgt_update, total_steps
@@ -263,10 +277,14 @@ def run_optuna(
         # ── Fase de validación greedy (sin exploración) ───────────
         agent.epsilon = 0.0
         n_val = 30 if STOCHASTIC_MODE else 10
-        val_rewards = [
-            _run_validation_episode(agent, env, start_node=0)
-            for _ in range(n_val)
-        ]
+        val_rewards = []
+        for _ in range(n_val):
+            day_idx = np.random.randint(0, num_days)
+            _, rm_pen = build_day_matrices(
+                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+            )
+            env.update_reward_matrix(rm_pen)
+            val_rewards.append(_run_validation_episode(agent, env, start_node=0))
 
         result = float(np.mean(val_rewards))
         print(f"Trial {trial.number + 1}/{n_trials} finalizado — val reward: {result:.2f}")
