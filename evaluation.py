@@ -32,8 +32,19 @@ from Solvers import (
 # ── Route generation ─────────────────────────────────────────
 def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penalized,
                             num_nodes, max_duration=MAX_DURATION,
-                            max_steps=MAX_STEPS_PER_EPISODE):
-    """Greedy rollout with the trained agent (epsilon=0, no grad)."""
+                            max_steps=MAX_STEPS_PER_EPISODE,
+                            distance_arr=None):
+    """Greedy rollout with the trained agent (epsilon=0, no grad).
+
+    Acepta tanto DQNAgent_Optimized como AMRoutingAgent.
+    Para AMRoutingAgent se delega a agent.generate_route() directamente.
+    """
+    if hasattr(agent, 'generate_route') and distance_arr is not None:
+        return agent.generate_route(
+            start_node, reward_matrix_penalized, time_matrix,
+            distance_arr, max_duration, max_steps,
+        )
+
     agent.epsilon = 0
     agent.policy_net.eval()
 
@@ -143,14 +154,16 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
 
 # ── Stochastic evaluation ─────────────────────────────────────
 def evaluate_stochastic(agent, start_node, time_matrix, reward_matrix_penalized,
-                         num_nodes, noise_sigma, n_episodes=N_EVAL_EPISODES):
+                         num_nodes, noise_sigma, n_episodes=N_EVAL_EPISODES,
+                         distance_arr=None):
     rewards   = []
     durations = []
     valid     = 0
 
     for _ in range(n_episodes):
         route, reward, duration = generate_optimal_route(
-            agent, start_node, time_matrix, reward_matrix_penalized, num_nodes)
+            agent, start_node, time_matrix, reward_matrix_penalized, num_nodes,
+            distance_arr=distance_arr)
         if route is not None:
             if STOCHASTIC_MODE and noise_sigma > 0:
                 # Independent Gaussian noise per edge: aggregate std = sigma * sqrt(n_edges)
@@ -209,7 +222,8 @@ def run_solver_comparison(agent, time_matrix,
         # DRL
         t0 = time.time()
         drl_route, drl_reward, drl_duration = generate_optimal_route(
-            agent, s, time_matrix, reward_matrix_penalized, num_nodes)
+            agent, s, time_matrix, reward_matrix_penalized, num_nodes,
+            distance_arr=distance_arr)
         drl_times.append(time.time() - t0)
         row.update({
             'DRL Route':    drl_route,
@@ -218,7 +232,8 @@ def run_solver_comparison(agent, time_matrix,
             'DRL Valid':    drl_route is not None and drl_route[0] == drl_route[-1],
         })
         stoch = evaluate_stochastic(agent, s, time_matrix, reward_matrix_penalized,
-                                     num_nodes, noise_sigma)
+                                     num_nodes, noise_sigma,
+                                     distance_arr=distance_arr)
         row.update({
             'DRL Stoch Mean':   stoch['mean_reward'],
             'DRL Stoch Std':    stoch['std_reward'],

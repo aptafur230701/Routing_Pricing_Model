@@ -7,7 +7,10 @@ import torch.optim as optim
 from torch.distributions import Categorical # For sampling actions
 import matplotlib.pyplot as plt
 import pulp 
-import time
+from config import MAX_STEPS_PER_EPISODE
+
+MAX_ARCS = MAX_STEPS_PER_EPISODE
+MAX_ROUTE_LEN = MAX_ARCS + 1
 
 
 def generate_optimal_route_pytorch(agent, start_node, time_matrix, reward_matrix, NUM_NODES,MAX_DURATION,MAX_STEPS_PER_EPISODE):
@@ -131,6 +134,7 @@ def generate_optimal_route_pytorch(agent, start_node, time_matrix, reward_matrix
         else:
             # Cycle formed, but duration or node visit is invalid
             return route, total_reward, time_elapsed # Return invalid route details
+
 def solve_mip(start_node, time_m, reward_m, max_d, num_n):
     """Solves the VRP variant using MIP for a given start node."""
     nodes = list(range(num_n))
@@ -161,7 +165,12 @@ def solve_mip(start_node, time_m, reward_m, max_d, num_n):
     prob += total_time <= max_d
 
     # 2b. Maximum steps constraint (total number of arcs used <= 5)
-    prob += pulp.lpSum(x[i][j] for i in nodes for j in nodes if i != j) <= 5
+    prob += pulp.lpSum(
+    x[i][j]
+    for i in nodes
+    for j in nodes
+    if i != j
+) <= MAX_ARCS
 
     # 3. Subtour Elimination (MTZ)
     for i in other_nodes:
@@ -257,7 +266,7 @@ def solve_heuristic(start_node, time_m, reward_m, max_d, num_n):
     visited = {start_node}
     return_threshold = 0.75 * max_d
     steps = 0
-    while True and steps <5:  # Continue until we break
+    while True and steps < MAX_ARCS:  # Continue until we break
         # Find next highest reward move
         best_reward = -np.inf
         best_next_node = None
@@ -300,8 +309,8 @@ def solve_heuristic(start_node, time_m, reward_m, max_d, num_n):
             route.append(start_node)
             steps += 1
             break
-    if len(route) == 6 and route[-1] != start_node:
-        # Force return home if we have 5 steps but not yet home
+    if len(route) == MAX_ROUTE_LEN and route[-1] != start_node:
+        # Force return home if we have MAX_ARCS steps but not yet home
         #Change the last step to return home
         node_to_delete = route[-1]
         route = route[0:-1]
@@ -315,7 +324,7 @@ def solve_heuristic(start_node, time_m, reward_m, max_d, num_n):
         return_time = time_m[current_node][start_node]
         time_elapsed += return_time
         total_reward += reward_m[current_node][start_node]
-    elif len(route) < 6 and route[-1] != start_node:
+    elif len(route) < MAX_ROUTE_LEN and route[-1] != start_node:
         current_node = route[-1]
         route.append(start_node)
         #Now update time and reward accordingly
@@ -331,6 +340,7 @@ def solve_heuristic(start_node, time_m, reward_m, max_d, num_n):
             status = "Optimal"
             is_valid = True
     return status, route, total_reward, time_elapsed, is_valid
+
 def solve_lp_relaxation(start_node, time_m, reward_m, max_d, num_n):
     """Solves LP relaxation of the VRP variant for upper bound."""
     nodes = list(range(num_n))
@@ -477,7 +487,7 @@ def solve_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n):
             is_feasible = (repaired_time <= max_d and 
                           repaired_route[0] == start_node and 
                           repaired_route[-1] == start_node and
-                          len(repaired_route) - 1 <= 6)  # Max 6 steps constraint
+                          len(repaired_route) - 1 <= MAX_ARCS)  # Max steps constraint
             
             if is_feasible:
                 # --- Acceptance Criterion: Simulated Annealing ---
@@ -520,7 +530,7 @@ def solve_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n):
                 best_route[0] == start_node and 
                 best_route[-1] == start_node and
                 best_time <= max_d and
-                len(best_route) - 1 <= 6)
+                len(best_route) - 1 <= MAX_ARCS)
     
     final_status = "Optimal" if is_valid else "Infeasible"
     
@@ -653,12 +663,12 @@ def solve_genetic_algorithm(start_node, time_m, reward_m, max_d, num_n):
     
     # Seed 1: Greedy heuristic
     status, route, reward, duration, is_valid = solve_heuristic(start_node, time_m, reward_m, max_d, num_n)
-    if is_valid and len(route) <= 6:
+    if is_valid and len(route) <= MAX_ROUTE_LEN:
         population.append({'route': route, 'reward': reward, 'duration': duration})
     # Seed 2: Nearest neighbor with randomization
     for _ in range(max(2, population_size // 4)):
         route = _generate_route_nearest_neighbor(start_node, time_m, reward_m, max_d, num_n)
-        if route and len(route) <= 6:
+        if route and len(route) <= MAX_ROUTE_LEN:
             duration = sum(time_m[route[i]][route[i+1]] for i in range(len(route) - 1))
             reward = sum(reward_m[route[i]][route[i+1]] for i in range(len(route) - 1))
             if duration <= max_d:
@@ -666,14 +676,14 @@ def solve_genetic_algorithm(start_node, time_m, reward_m, max_d, num_n):
     # Seed 3: Random feasible routes
     for _ in range(max(2, population_size // 4)):
         route = _generate_random_feasible_route(start_node, time_m, reward_m, max_d, num_n)
-        if route and len(route) <= 6:
+        if route and len(route) <= MAX_ROUTE_LEN:
             duration = sum(time_m[route[i]][route[i+1]] for i in range(len(route) - 1))
             reward = sum(reward_m[route[i]][route[i+1]] for i in range(len(route) - 1))
             population.append({'route': route, 'reward': reward, 'duration': duration})
     # Fill remaining population slots
     while len(population) < population_size:
         route = _generate_route_nearest_neighbor(start_node, time_m, reward_m, max_d, num_n)
-        if route and len(route) <= 6:
+        if route and len(route) <= MAX_ROUTE_LEN:
             duration = sum(time_m[route[i]][route[i+1]] for i in range(len(route) - 1))
             reward = sum(reward_m[route[i]][route[i+1]] for i in range(len(route) - 1))
             if duration <= max_d:
@@ -708,7 +718,7 @@ def solve_genetic_algorithm(start_node, time_m, reward_m, max_d, num_n):
                     parent1['route'], parent2['route'], start_node, time_m, reward_m, max_d
                 )
                 
-                if child_route and len(child_route) <= 6:
+                if child_route and len(child_route) <= MAX_ROUTE_LEN:
                     # Apply mutation (2-opt improvement)
                     if np.random.rand() < mutation_rate:
                         child_route = _apply_2opt_mutation(child_route, start_node, time_m, reward_m, max_d)
@@ -717,18 +727,18 @@ def solve_genetic_algorithm(start_node, time_m, reward_m, max_d, num_n):
                     child_duration = sum(time_m[child_route[i]][child_route[i+1]] for i in range(len(child_route) - 1))
                     child_reward = sum(reward_m[child_route[i]][child_route[i+1]] for i in range(len(child_route) - 1))
                     
-                    if child_duration <= max_d and len(child_route) <= 6:
+                    if child_duration <= max_d and len(child_route) <= MAX_ROUTE_LEN:
                         offspring.append({'route': child_route, 'reward': child_reward, 'duration': child_duration})
             else:
                 # Pure mutation (2-opt on existing solution)
                 parent = new_population[np.random.randint(0, len(new_population))]
                 mutant_route = _apply_2opt_mutation(parent['route'][:], start_node, time_m, reward_m, max_d)
                 
-                if mutant_route and len(mutant_route) <= 6:
+                if mutant_route and len(mutant_route) <= MAX_ROUTE_LEN:
                     mutant_duration = sum(time_m[mutant_route[i]][mutant_route[i+1]] for i in range(len(mutant_route) - 1))
                     mutant_reward = sum(reward_m[mutant_route[i]][mutant_route[i+1]] for i in range(len(mutant_route) - 1))
                     
-                    if mutant_duration <= max_d and len(mutant_route) <= 6:
+                    if mutant_duration <= max_d and len(mutant_route) <= MAX_ROUTE_LEN:
                         offspring.append({'route': mutant_route, 'reward': mutant_reward, 'duration': mutant_duration})
         # --- Replace population (keep best from offspring) ---
         population = offspring[:population_size]
@@ -743,7 +753,7 @@ def solve_genetic_algorithm(start_node, time_m, reward_m, max_d, num_n):
                 best_overall['route'][0] == start_node and 
                 best_overall['route'][-1] == start_node and
                 best_overall['duration'] <= max_d and
-                len(best_overall['route']) <= 6 and
+                len(best_overall['route']) <= MAX_ROUTE_LEN and
                 len(best_overall['route']) >= 2)
     
     final_status = "Optimal" if is_valid else "Infeasible"
@@ -762,7 +772,7 @@ def _generate_route_nearest_neighbor(start_node, time_m, reward_m, max_d, num_n)
     visited = {start_node}
     time_elapsed = 0.0
     steps = 0
-    max_steps = 5  # Max 5 steps = 6 nodes total
+    max_steps = MAX_ARCS  
     
     while steps < max_steps:
         # Find nearest unvisited node that keeps us feasible
@@ -785,8 +795,8 @@ def _generate_route_nearest_neighbor(start_node, time_m, reward_m, max_d, num_n)
         else:
             break
     
-    if len(route) == 6 and current_node != start_node:
-        # Force return home if we have 5 steps but not yet home
+    if len(route) == MAX_ROUTE_LEN and current_node != start_node:
+        # Force return home if we have MAX_ARCS steps but not yet home
         #Change the last step to return home
         node_to_delete = route[-1]
         route = route[0:-1]
@@ -797,14 +807,14 @@ def _generate_route_nearest_neighbor(start_node, time_m, reward_m, max_d, num_n)
         #Now update time and reward accordingly
         return_time = time_m[current_node][start_node]
         time_elapsed += return_time
-    elif len(route) < 6 and route[-1] != start_node:
+    elif len(route) < MAX_ROUTE_LEN and route[-1] != start_node:
         current_node = route[-1]
         route.append(start_node)
         #Now update time and reward accordingly
         return_time = time_m[current_node][start_node]
         time_elapsed += return_time
     
-    if time_elapsed <= max_d and route[0] == route[-1] == start_node and len(route) <= 6:
+    if time_elapsed <= max_d and route[0] == route[-1] == start_node and len(route) <= MAX_ROUTE_LEN:
         return route
     return None
 
@@ -819,7 +829,7 @@ def _generate_random_feasible_route(start_node, time_m, reward_m, max_d, num_n):
     visited = {start_node}
     time_elapsed = 0.0
     steps = 0
-    max_steps = 5  # Max 5 steps = 6 nodes total
+    max_steps = MAX_ARCS  # Max 5 steps = 6 nodes total
     
     while steps < max_steps:
         # Get all unvisited nodes that keep us feasible
@@ -843,8 +853,8 @@ def _generate_random_feasible_route(start_node, time_m, reward_m, max_d, num_n):
             break
     
     # Return home
-    if len(route) == 6 and current_node != start_node:
-        # Force return home if we have 5 steps but not yet home
+    if len(route) == MAX_ROUTE_LEN and current_node != start_node:
+        # Force return home if we have MAX_ARCS steps but not yet home
         #Change the last step to return home
         node_to_delete = route[-1]
         route = route[0:-1]
@@ -855,14 +865,14 @@ def _generate_random_feasible_route(start_node, time_m, reward_m, max_d, num_n):
         #Now update time and reward accordingly
         return_time = time_m[current_node][start_node]
         time_elapsed += return_time
-    elif len(route) < 6 and route[-1] != start_node:
+    elif len(route) < MAX_ROUTE_LEN and route[-1] != start_node:
         current_node = route[-1]
         route.append(start_node)
         #Now update time and reward accordingly
         return_time = time_m[current_node][start_node]
         time_elapsed += return_time
     
-    if time_elapsed <= max_d and route[0] == route[-1] == start_node and len(route) <= 6:
+    if time_elapsed <= max_d and route[0] == route[-1] == start_node and len(route) <= MAX_ROUTE_LEN:
         return route
     return None
 
@@ -872,7 +882,7 @@ def _crossover_routes(route1, route2, start_node, time_m, reward_m, max_d):
     Order Crossover (OX): Combines two routes by:
     1. Copy segment from parent1
     2. Fill remaining nodes from parent2 in order
-    Respects max 6 nodes (5 steps) constraint
+    Respects max MAX_ROUTE_LEN nodes (MAX_ARCS steps) constraint
     """
     if len(route1) < 4 or len(route2) < 4:
         return route1 if np.random.rand() < 0.5 else route2
@@ -891,7 +901,7 @@ def _crossover_routes(route1, route2, start_node, time_m, reward_m, max_d):
     
     # Fill remaining nodes from parent2 in order, respecting max length
     for node in route2[1:-1]:
-        if node not in child_nodes and len(child) < 5:  # Leave room for return to start
+        if node not in child_nodes and len(child) < MAX_ROUTE_LEN - 1:  # Leave room for return to start
             child.append(node)
             child_nodes.add(node)
     
@@ -899,13 +909,13 @@ def _crossover_routes(route1, route2, start_node, time_m, reward_m, max_d):
     child.append(start_node)
     
     # Validate feasibility
-    if len(child) > 6:
-        child = child[:6]
+    if len(child) > MAX_ROUTE_LEN:
+        child = child[:MAX_ROUTE_LEN]
         child[-1] = start_node
     
     duration = sum(time_m[child[i]][child[i+1]] for i in range(len(child) - 1))
     
-    if duration <= max_d and len(child) <= 6 and len(child) >= 2:
+    if duration <= max_d and len(child) <= MAX_ROUTE_LEN and len(child) >= 2:
         return child
     return None
 
@@ -913,7 +923,7 @@ def _crossover_routes(route1, route2, start_node, time_m, reward_m, max_d):
 def _apply_2opt_mutation(route, start_node, time_m, reward_m, max_d):
     """
     2-opt mutation: Try reversing a segment to improve the route.
-    Maintains max 6 nodes constraint.
+    Maintains max MAX_ROUTE_LEN nodes constraint.
     """
     best_route = route[:]
     best_reward = sum(reward_m[route[i]][route[i+1]] for i in range(len(route) - 1))
@@ -931,7 +941,7 @@ def _apply_2opt_mutation(route, start_node, time_m, reward_m, max_d):
                 new_route = best_route[:i] + best_route[i:j+1][::-1] + best_route[j+1:]
                 
                 # Skip if exceeds max length
-                if len(new_route) > 6:
+                if len(new_route) > MAX_ROUTE_LEN:
                     continue
                 
                 new_duration = sum(time_m[new_route[k]][new_route[k+1]] for k in range(len(new_route) - 1))
@@ -945,4 +955,4 @@ def _apply_2opt_mutation(route, start_node, time_m, reward_m, max_d):
             if improved:
                 break
     
-    return best_route if len(best_route) <= 6 else None
+    return best_route if len(best_route) <= MAX_ROUTE_LEN else None
