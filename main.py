@@ -37,7 +37,7 @@ from config import (
 from state import get_state_size
 from problem_data import load_matrices
 from evaluation import (
-    run_solver_comparison, save_results, plot_diagnostics,
+    run_solver_comparison, save_results, plot_diagnostics, plot_ppo_diagnostics,
 )
 
 # ── Seleccionar modo ──────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ def _run_am(
 
     set_seeds(SEED)
     t0 = time.time()
-    agent_am, critic, ep_rewards, ep_losses, _ = run_am_training(
+    agent_am, critic, ep_rewards, ep_losses, training_log = run_am_training(
         time_matrix, rate_stack, loads_stack,
         distance_arr, diesel_arr, noise_sigma, NUM_NODES,
     )
@@ -119,7 +119,7 @@ def _run_am(
         {"agent": agent_am.state_dict(), "critic": critic.state_dict()},
         os.path.join(cwd, f"am_checkpoint_{NUM_NODES}nodes.pt"),
     )
-    return agent_am, ep_rewards, ep_losses, train_time
+    return agent_am, ep_rewards, ep_losses, train_time, training_log
 
 
 def _evaluate_and_report(
@@ -207,7 +207,7 @@ def main():
             )
 
         if MODE in ("AM", "BOTH"):
-            agent_am, ep_r, ep_l, t = _run_am(
+            agent_am, ep_r, ep_l, t, training_log = _run_am(
                 NUM_NODES, time_matrix, rate_stack, loads_stack,
                 distance_arr, diesel_arr, noise_sigma, cwd,
             )
@@ -216,6 +216,9 @@ def main():
                 distance_arr, diesel_arr, noise_sigma, ep_r, ep_l, t,
                 summary_rows, cwd, label="AM",
             )
+            suffix = f"_stochastic_sigma{NOISE_FRACTION:.0%}" if STOCHASTIC_MODE else "_deterministic"
+            ppo_plot_path = os.path.join(cwd, f"PPO_Diagnostics{suffix}_AM.png")
+            plot_ppo_diagnostics(training_log, NUM_NODES, ppo_plot_path)
 
     print("\nDone!")
 

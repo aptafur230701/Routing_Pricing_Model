@@ -327,6 +327,59 @@ def save_results(results_df, summary_rows, output_path):
     print(f"Results saved → {output_path}")
 
 
+def plot_ppo_diagnostics(training_log: list, num_nodes: int, output_path: str):
+    """Gráfica 2×3 con métricas internas de PPO por update.
+
+    Métricas graficadas
+    -------------------
+    Fila 1 : Reward promedio | Explained Variance | Entropía
+    Fila 2 : Policy Loss + Value Loss | KL Divergence | Clip Fraction
+    """
+    try:
+        import pandas as pd
+        df = pd.DataFrame(training_log)
+
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig.suptitle(
+            f'PPO Internal Diagnostics — {num_nodes} nodes '
+            f'(sigma={NOISE_FRACTION*100:.0f}%)', fontsize=14
+        )
+
+        updates = df["update"].values
+
+        def _plot(ax, y, title, ylabel, color, hline=None, hline_label=None):
+            ax.plot(updates, y, linewidth=0.9, color=color)
+            ax.set_title(title); ax.set_xlabel("PPO Update"); ax.set_ylabel(ylabel)
+            ax.grid(True, alpha=0.3)
+            if hline is not None:
+                ax.axhline(hline, color="red", linestyle="--", linewidth=0.8,
+                           label=hline_label or f"{hline}")
+                ax.legend(fontsize=8)
+
+        _plot(axes[0, 0], df["reward"],       "Avg Reward per Update",   "Reward",       "steelblue")
+        _plot(axes[0, 1], df["explained_var"], "Critic Explained Variance", "Expl. Var.", "mediumseagreen",
+              hline=0.5, hline_label="threshold 0.5")
+        _plot(axes[0, 2], df["entropy"],       "Policy Entropy",          "Entropy",      "mediumpurple")
+
+        ax_loss = axes[1, 0]
+        ax_loss.plot(updates, df["policy_loss"], linewidth=0.9, color="coral",    label="Policy loss")
+        ax_loss.plot(updates, df["value_loss"],  linewidth=0.9, color="goldenrod", label="Value loss")
+        ax_loss.set_title("Policy & Value Loss"); ax_loss.set_xlabel("PPO Update")
+        ax_loss.set_ylabel("Loss"); ax_loss.grid(True, alpha=0.3); ax_loss.legend(fontsize=8)
+
+        _plot(axes[1, 1], df["kl_divergence"], "Approx KL Divergence",   "KL",           "tomato",
+              hline=0.02, hline_label="target 0.02")
+        _plot(axes[1, 2], df["clip_fraction"], "PPO Clip Fraction",       "Clip Frac.",   "darkorange",
+              hline=0.1, hline_label="ref 0.10")
+
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150)
+        plt.close()
+        print(f"PPO diagnostics plot saved → {output_path}")
+    except Exception as e:
+        print(f"Warning: could not generate PPO diagnostics plot: {e}")
+
+
 def plot_diagnostics(episode_rewards, episode_losses, results_df,
                      num_nodes, output_path):
     try:
