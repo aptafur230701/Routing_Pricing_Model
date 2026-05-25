@@ -92,8 +92,9 @@ class AMRoutingAgent(nn.Module):
         -------
         embeddings : Tensor (1, N, d_h)
         h_t        : Tensor (1, d_h)
+        node_feats : np.ndarray (N, 5)
+        temporal   : np.ndarray (3,)
         """
-        # Features por nodo desde la posición actual
         node_feats = build_node_features(
             current_node, start_node, visited_set,
             reward_matrix_penalized, time_matrix, distance_arr,
@@ -110,7 +111,7 @@ class AMRoutingAgent(nn.Module):
         current_emb = embeddings[:, current_node, :]                # (1, d_h)
         h_t = self.context_net(graph_emb, current_emb, temporal_t)  # (1, d_h)
 
-        return embeddings, h_t
+        return embeddings, h_t, node_feats, temporal
 
     @staticmethod
     def _build_mask(
@@ -177,8 +178,8 @@ class AMRoutingAgent(nn.Module):
         total_reward  = 0.0
         returned_home = False
 
-        for step in range(max_steps):
-            embeddings, h_t = self._encode_step(
+        for step in range(max_steps-1):
+            embeddings, h_t, _, _ = self._encode_step(
                 current_node, start_node, visited_set,
                 time_elapsed, step,
                 reward_matrix_penalized, time_matrix, distance_arr,
@@ -293,7 +294,7 @@ class AMRoutingAgent(nn.Module):
         log_prob : Tensor escalar
         entropy  : Tensor escalar
         """
-        embeddings, h_t = self._encode_step(
+        embeddings, h_t, _, _ = self._encode_step(
             current_node, start_node, visited_set,
             time_elapsed, step_count,
             reward_matrix_penalized, time_matrix, distance_arr,
@@ -302,3 +303,66 @@ class AMRoutingAgent(nn.Module):
         mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
         action_t, log_prob, entropy = self.decoder.act(h_t, embeddings, mask_t)
         return int(action_t.item()), log_prob.squeeze(0), entropy.squeeze(0)
+
+    def act_with_value(
+        self,
+        critic:                 nn.Module,
+        current_node:           int,
+        start_node:             int,
+        visited_set:            set,
+        time_elapsed:           float,
+        step_count:             int,
+        reward_matrix_penalized,
+        time_matrix,
+        distance_arr:           np.ndarray,
+        max_duration:           float,
+        max_steps:              int,
+        action_mask:            np.ndarray,   # (N,) int8 de RoutingEnv
+    ):
+        """
+        Paso estocástico para recolección PPO: samplea acción y estima valor.
+
+        Retorna
+        -------
+        action     : int
+        log_prob   : Tensor escalar
+        entropy    : Tensor escalar
+        value      : float
+        node_feats : np.ndarray (N, 5)  — para almacenar en RolloutBuffer
+        temporal   : np.ndarray (3,)    — para almacenar en RolloutBuffer
+        """
+        embeddings, h_t, node_feats, temporal = self._encode_step(
+            current_node, start_node, visited_set,
+            time_elapsed, step_count,
+            reward_matrix_penalized, time_matrix, distance_arr,
+            max_duration, max_steps,
+        )
+        value  = critic(h_t).item()
+        mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
+        action_t, log_prob, entropy = self.decoder.act(h_t, embeddings, mask_t)
+        return int(action_t.item()), log_prob.squeeze(0), entropy.squeeze(0), value, node_feats, temporal
+
+    def estimate_value(
+        self,
+        critic:                 nn.Module,
+        current_node:           int,
+        start_node:             int,
+        visited_set:            set,
+        time_elapsed:           float,
+        step_count:             int,
+        reward_matrix_penalized,
+        time_matrix,
+        distance_arr:           np.ndarray,
+        max_duration:           float,
+        max_steps:              int,
+    ) -> float:
+        """
+        Estima V(s) para bootstrap en episodios truncados.
+        """
+        _, h_t, _, _ = self._encode_step(
+            current_node, start_node, visited_set,
+            time_elapsed, step_count,
+            reward_matrix_penalized, time_matrix, distance_arr,
+            max_duration, max_steps,
+        )
+        return critic(h_t).item()

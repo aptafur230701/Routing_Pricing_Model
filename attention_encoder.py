@@ -98,7 +98,11 @@ def build_node_features(
     # Recortar reward para evitar BIG_M_PENALTY (-1e9) en la diagonal
     feats[:, 0] = np.clip(feats[:, 0], -1e4, 1e4)
 
-    # reward: min-max relativo a la fila actual (current_node)
+    # reward y distancia:
+    # normalización relativa intra-fila para preservar ranking local
+    # entre las alternativas disponibles desde current_node.
+    # Esto ayuda al encoder a comparar qué nodos son mejores/peores
+    # dentro del estado actual independientemente de la escala absoluta.
     for col in (0, 2):
         col_min = feats[:, col].min()
         col_max = feats[:, col].max()
@@ -107,7 +111,11 @@ def build_node_features(
         else:
             feats[:, col] = 0.0
 
-    # time: normalización absoluta por max_duration (referencia global)
+    # tiempo:
+    # normalización absoluta respecto al presupuesto global
+    # para preservar información de factibilidad temporal.
+    # Un arco largo debe seguir viéndose "caro" temporalmente aunque
+    # todos los demás arcos también sean largos.
     # Se aplica UNA sola vez para preservar la escala temporal real.
     feats[:, 1] = np.clip(feats[:, 1] / max(max_duration, 1e-6), 0.0, 1.0)
 

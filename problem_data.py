@@ -105,7 +105,7 @@ def load_matrices(num_nodes: int) -> tuple:
     loads_stack_raw = np.load(os.path.join(cwd, "load_multiday.npy"))
 
     # ── Slice fixed matrices to num_nodes ─────────────────────────
-    time_matrix  = (time_matrix_raw.iloc[:num_nodes, :num_nodes] * 0.9).round(1)
+    time_matrix  = (time_matrix_raw.iloc[:num_nodes, :num_nodes]).copy()
     time_matrix.index   = range(num_nodes)   # reset a enteros 0-based
     time_matrix.columns = range(num_nodes)
     distance_arr = distance_raw.iloc[:num_nodes, :num_nodes].to_numpy(dtype=float)

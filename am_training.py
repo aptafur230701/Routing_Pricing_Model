@@ -37,10 +37,6 @@ from config import (
 )
 from routing_env import RoutingEnv
 from problem_data import build_day_matrices
-from attention_encoder import (
-    build_node_features,
-    build_temporal_features,
-)
 from am_agent import AMRoutingAgent
 from critic_head import CriticHead
 from debug_utils import check_tensor
@@ -254,10 +250,6 @@ def run_am_training(
     torch.manual_seed(SEED)
     np.random.seed(SEED)
 
-    # Detecta operaciones que producen NaN/Inf durante el backward pass.
-    # Ralentiza el entrenamiento; desactivar una vez localizada la causa raíz.
-    torch.autograd.set_detect_anomaly(True)
-
     episodes_per_node = get_episodes_per_node(num_nodes)
     total_episodes    = episodes_per_node * num_nodes
     n_updates         = max(1, total_episodes // n_episodes_per_update)
@@ -324,30 +316,17 @@ def run_am_training(
 
             with torch.no_grad():
                 for step in range(MAX_STEPS_PER_EPISODE):
-                    # Construir inputs estructurados
-                    nf = build_node_features(
-                        env.current_node, env.start_node, env.visited_set,
-                        rm_pen, time_matrix, distance_arr,
-                        num_nodes, MAX_DURATION,
-                    )
-                    tf = build_temporal_features(
-                        env.time_elapsed, step, MAX_DURATION, MAX_STEPS_PER_EPISODE
-                    )
                     mask = info["action_mask"]   # (N,) int8
-
-                    # Tensores de tamaño 1 (batch=1)
-                    nf_t  = torch.from_numpy(nf).unsqueeze(0).to(DEVICE)
-                    tf_t  = torch.from_numpy(tf).unsqueeze(0).to(DEVICE)
-                    cn_t  = torch.tensor([env.current_node], dtype=torch.long).to(DEVICE)
-                    mask_t = torch.from_numpy(mask).unsqueeze(0).to(DEVICE)
-
-                    action_t, log_prob, _, value = _forward(
-                        agent, critic, nf_t, tf_t, cn_t, mask_t, actions_t=None
-                    )
-                    action = int(action_t.item())
-
-                    # Guardar nodo actual ANTES del paso (necesario para PPO update)
                     current_node_before_step = env.current_node
+
+                    action, log_prob, _, value, nf, tf = agent.act_with_value(
+                        critic,
+                        env.current_node, env.start_node, env.visited_set,
+                        env.time_elapsed, step,
+                        rm_pen, time_matrix, distance_arr,
+                        MAX_DURATION, MAX_STEPS_PER_EPISODE,
+                        action_mask=mask,
+                    )
 
                     next_obs, reward, terminated, truncated, info = env.step(action)
                     done = terminated or truncated
@@ -355,35 +334,23 @@ def run_am_training(
                     if truncated:
                         ep_truncated = True
                         reward += INCOMPLETE_PENALTY
-                        # Bootstrap: episodio cortado → hay valor futuro estimable
-                        nf_next = build_node_features(
+                        last_value = agent.estimate_value(
+                            critic,
                             env.current_node, env.start_node, env.visited_set,
-                            rm_pen, time_matrix, distance_arr,
-                            num_nodes, MAX_DURATION,
-                        )
-                        tf_next = build_temporal_features(
                             env.time_elapsed, step + 1,
-                            MAX_DURATION, MAX_STEPS_PER_EPISODE
+                            rm_pen, time_matrix, distance_arr,
+                            MAX_DURATION, MAX_STEPS_PER_EPISODE,
                         )
-                        nf_next_t  = torch.from_numpy(nf_next).unsqueeze(0).to(DEVICE)
-                        tf_next_t  = torch.from_numpy(tf_next).unsqueeze(0).to(DEVICE)
-                        cn_next_t  = torch.tensor([env.current_node], dtype=torch.long).to(DEVICE)
-                        # Bug fix: llamar encoder una sola vez y reutilizar embeddings
-                        emb_next, graph_next = agent.encoder(nf_next_t)
-                        cur_next_emb = emb_next[:, env.current_node, :]
-                        h_next = agent.context_net(graph_next, cur_next_emb, tf_next_t)
-                        last_value = critic(h_next).item()
 
                     buffer.add(
                         node_feats=nf,
                         temporal=tf,
-                        # Bug fix: nodo ANTES del paso, no después
                         current_node=current_node_before_step,
                         mask=mask,
                         action=action,
                         reward=float(reward),
                         log_prob=log_prob.item(),
-                        value=value.item(),
+                        value=value,
                         done=done,
                     )
 

@@ -4,7 +4,7 @@ evaluation.py
 Post-training evaluation:
   · generate_optimal_route  — deterministic greedy rollout with trained agent
   · evaluate_stochastic     — N-episode stochastic reward distribution
-  · run_solver_comparison   — DRL vs MIP vs Greedy vs 2-Opt vs GA
+  · run_solver_comparison   — DRL vs MIP vs Greedy vs 2-Opt vs GA vs LNS
   · save_results            — Excel output
   · plot_diagnostics        — 2×2 training diagnostics figure
 """
@@ -26,6 +26,7 @@ from problem_data import sample_stochastic_reward, build_day_matrices
 from Solvers import (
     solve_mip, solve_heuristic, solve_2opt_heuristic,
     solve_LNS_metaheuristic, solve_genetic_algorithm,
+    solve_HGA_LNS_metaheuristic,
 )
 
 
@@ -206,7 +207,9 @@ def run_solver_comparison(agent, time_matrix,
     heuristic_times   = []
     drl_times         = []
     heuristic2_times  = []
+    ga_times          = []
     lns_times         = []
+    hga_lns_times     = []
     num_days          = rate_stack.shape[0]
 
     print("\n--- Solver Comparison ---")
@@ -219,18 +222,21 @@ def run_solver_comparison(agent, time_matrix,
         print(f"\nStart node {s} | day {day_idx}")
         row = {'Start Node': s, 'Day Index': day_idx}
 
-        # DRL
+        # DRL — Det evaluation (sin ruido, mismas condiciones que los baselines)
+        # Se usa noise_sigma=0 implícitamente: generate_optimal_route es determinista.
+        # Esto permite un gap de calidad justo. La evaluación estocástica se reporta aparte.
         t0 = time.time()
         drl_route, drl_reward, drl_duration = generate_optimal_route(
             agent, s, time_matrix, reward_matrix_penalized, num_nodes,
             distance_arr=distance_arr)
         drl_times.append(time.time() - t0)
         row.update({
-            'DRL Route':    drl_route,
-            'DRL Reward':   drl_reward   if drl_route else -np.inf,
-            'DRL Duration': drl_duration if drl_route else np.inf,
-            'DRL Valid':    drl_route is not None and drl_route[0] == drl_route[-1],
+            'DRL Route':          drl_route,
+            'DRL Det Reward':  drl_reward   if drl_route else -np.inf,
+            'DRL Duration':       drl_duration if drl_route else np.inf,
+            'DRL Valid':          drl_route is not None and drl_route[0] == drl_route[-1],
         })
+        # DRL — Stochastic evaluation (con ruido, mide robustez bajo incertidumbre)
         stoch = evaluate_stochastic(agent, s, time_matrix, reward_matrix_penalized,
                                      num_nodes, noise_sigma,
                                      distance_arr=distance_arr)
@@ -239,7 +245,7 @@ def run_solver_comparison(agent, time_matrix,
             'DRL Stoch Std':    stoch['std_reward'],
             'DRL Stoch Valid%': stoch['valid_fraction'] * 100,
         })
-        print(f"  DRL:    {drl_route} | reward {drl_reward:.1f}")
+        print(f"  DRL Det: {drl_route} | reward {drl_reward:.1f} | stoch mean {stoch['mean_reward']:.1f} ± {stoch['std_reward']:.1f}")
 
         # MIP
         t0 = time.time()
@@ -285,27 +291,55 @@ def run_solver_comparison(agent, time_matrix,
         t0 = time.time()
         ga_status, ga_route, ga_reward, ga_duration = solve_genetic_algorithm(
             s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes)
-        lns_times.append(time.time() - t0)
+        ga_times.append(time.time() - t0)
         row.update({
             'GA Status':   ga_status,
             'GA Route':    ga_route,
-            'LNS Reward':  ga_reward   if ga_status == 'Optimal' else -np.inf,
-            'LNS Duration': ga_duration if ga_status == 'Optimal' else np.inf,
-            'LNS Valid':   ga_status == 'Optimal' and ga_route is not None,
+            'GA Reward':   ga_reward   if ga_status == 'Optimal' else -np.inf,
+            'GA Duration': ga_duration if ga_status == 'Optimal' else np.inf,
+            'GA Valid':    ga_status == 'Optimal' and ga_route is not None,
         })
         print(f"  GA:     {ga_route} | reward {ga_reward:.1f}")
 
-        # Optimality gaps vs MIP
+        # LNS
+        t0 = time.time()
+        lns_status, lns_route, lns_reward, lns_duration = solve_LNS_metaheuristic(
+            s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes)
+        lns_times.append(time.time() - t0)
+        row.update({
+            'LNS Status':   lns_status,
+            'LNS Route':    lns_route,
+            'LNS Reward':   lns_reward   if lns_status == 'Optimal' else -np.inf,
+            'LNS Duration': lns_duration if lns_status == 'Optimal' else np.inf,
+            'LNS Valid':    lns_status == 'Optimal' and lns_route is not None,
+        })
+        print(f"  LNS:    {lns_route} | reward {lns_reward:.1f}")
+
+        # HGA-LNS
+        t0 = time.time()
+        hga_status, hga_route, hga_reward, hga_duration = solve_HGA_LNS_metaheuristic(
+            s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes)
+        hga_lns_times.append(time.time() - t0)
+        row.update({
+            'HGA-LNS Status':   hga_status,
+            'HGA-LNS Route':    hga_route,
+            'HGA-LNS Reward':   hga_reward   if hga_status == 'Optimal' else -np.inf,
+            'HGA-LNS Duration': hga_duration if hga_status == 'Optimal' else np.inf,
+            'HGA-LNS Valid':    hga_status == 'Optimal' and hga_route is not None,
+        })
+        print(f"  HGA-LNS:{hga_route} | reward {hga_reward:.1f}")
+
+        # Optimality gaps vs MIP — usa DRL Det Reward para comparación justa
         mip_r = row['MIP Reward']
         def gap(solver_r, solver_valid):
             if row['MIP Valid'] and solver_valid and abs(mip_r) > 1e-6:
                 return ((mip_r - solver_r) / abs(mip_r)) * 100
             return float('nan')
 
-        row['DRL Gap (%)']       = gap(row['DRL Reward'],       row['DRL Valid'])
-        row['Heuristic Gap (%)'] = gap(row['Heuristic Reward'], row['Heuristic Valid'])
-        row['2Opt Gap (%)']      = gap(row['2Opt Reward'],      row['2Opt Valid'])
-        row['LNS Gap (%)']       = gap(row['LNS Reward'],       row['LNS Valid'])
+        row['DRL Gap (%)']       = gap(row['DRL Det Reward'],  row['DRL Valid'])
+        row['Heuristic Gap (%)'] = gap(row['Heuristic Reward'],   row['Heuristic Valid'])
+        row['2Opt Gap (%)']      = gap(row['2Opt Reward'],        row['2Opt Valid'])
+        row['LNS Gap (%)']       = gap(row['LNS Reward'],         row['LNS Valid'])
         results.append(row)
 
     df = pd.DataFrame(results)
@@ -313,7 +347,8 @@ def run_solver_comparison(agent, time_matrix,
     timing = {
         'mip_times': mip_times, 'heuristic_times': heuristic_times,
         'drl_times': drl_times, 'heuristic2_times': heuristic2_times,
-        'lns_times': lns_times,
+        'ga_times': ga_times,   'lns_times': lns_times,
+        'hga_lns_times': hga_lns_times,
     }
     return df, timing
 
@@ -406,7 +441,7 @@ def plot_diagnostics(episode_rewards, episode_losses, results_df,
 
         ax3 = axes[1, 0]
         nodes = list(range(num_nodes))
-        drl_r = [results_df.loc[results_df['Start Node'] == n, 'DRL Reward'].values[0]
+        drl_r = [results_df.loc[results_df['Start Node'] == n, 'DRL Det Reward'].values[0]
                  if results_df.loc[results_df['Start Node'] == n, 'DRL Valid'].values[0] else 0
                  for n in nodes]
         mip_r = [results_df.loc[results_df['Start Node'] == n, 'MIP Reward'].values[0]

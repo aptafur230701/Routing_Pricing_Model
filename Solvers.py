@@ -164,7 +164,7 @@ def solve_mip(start_node, time_m, reward_m, max_d, num_n):
     total_time = pulp.lpSum(time_m[i][j] * x[i][j] for i in nodes for j in nodes if i != j)
     prob += total_time <= max_d
 
-    # 2b. Maximum steps constraint (total number of arcs used <= 5)
+    # 2b. Maximum steps constraint
     prob += pulp.lpSum(
     x[i][j]
     for i in nodes
@@ -254,30 +254,22 @@ def solve_mip(start_node, time_m, reward_m, max_d, num_n):
     return status, route, total_reward, total_duration
 
 def solve_heuristic(start_node, time_m, reward_m, max_d, num_n):
-    """
-    Solves using a simple greedy heuristic:
-    1. Always move to highest reward available node
-    2. Return to start node when no more valid moves
-    """
     current_node = start_node
     time_elapsed = 0.0
     total_reward = 0.0
     route = [start_node]
     visited = {start_node}
-    return_threshold = 0.75 * max_d
     steps = 0
-    while True and steps < MAX_ARCS:  # Continue until we break
-        # Find next highest reward move
-        best_reward = -np.inf
+
+    while steps < MAX_ARCS:
+        best_reward = 0  # CAMBIO: umbral mínimo 0, no -inf
         best_next_node = None
-        
+
         for next_node in range(num_n):
             if next_node != current_node and next_node not in visited:
                 step_time = time_m[current_node][next_node]
-                return_time = time_m[next_node][start_node]  # Time to get back home
+                return_time = time_m[next_node][start_node]
                 step_reward = reward_m[current_node][next_node]
-                
-                # Check if we can make this move and still get back home
                 total_future_time = time_elapsed + step_time + return_time
                 if total_future_time <= max_d:
                     if step_reward > best_reward:
@@ -285,7 +277,6 @@ def solve_heuristic(start_node, time_m, reward_m, max_d, num_n):
                         best_next_node = next_node
 
         if best_next_node is not None:
-            # Make the move to the highest reward node
             time_elapsed += time_m[current_node][best_next_node]
             total_reward += reward_m[current_node][best_next_node]
             current_node = best_next_node
@@ -293,53 +284,21 @@ def solve_heuristic(start_node, time_m, reward_m, max_d, num_n):
             visited.add(current_node)
             steps += 1
         else:
-            # No more valid moves, return home
-            return_time = time_m[current_node][start_node]
-            if current_node != start_node:  # Only if we're not already home
-                time_elapsed += return_time
-                total_reward += reward_m[current_node][start_node]
-                route.append(start_node)
-                steps += 1
-            break
-        # If we've reached the time threshold, try to return home
-        if time_elapsed >= return_threshold:
-            return_time = time_m[current_node][start_node]
+            break  # CAMBIO: sin return_threshold, sale directo cuando no hay arcos positivos
+
+    # Cerrar ciclo
+    if route[-1] != start_node:
+        return_time = time_m[current_node][start_node]
+        if time_elapsed + return_time <= max_d:
             time_elapsed += return_time
             total_reward += reward_m[current_node][start_node]
             route.append(start_node)
-            steps += 1
-            break
-    if len(route) == MAX_ROUTE_LEN and route[-1] != start_node:
-        # Force return home if we have MAX_ARCS steps but not yet home
-        #Change the last step to return home
-        node_to_delete = route[-1]
-        route = route[0:-1]
-        current_node = route[-1]
-        time_to_delete = time_m[current_node][node_to_delete]
-        time_elapsed = time_elapsed - time_to_delete
-        reward_to_delete = reward_m[current_node][node_to_delete]
-        total_reward = total_reward - reward_to_delete
-        route.append(start_node)
-        #Now update time and reward accordingly
-        return_time = time_m[current_node][start_node]
-        time_elapsed += return_time
-        total_reward += reward_m[current_node][start_node]
-    elif len(route) < MAX_ROUTE_LEN and route[-1] != start_node:
-        current_node = route[-1]
-        route.append(start_node)
-        #Now update time and reward accordingly
-        return_time = time_m[current_node][start_node]
-        time_elapsed += return_time
-        total_reward += reward_m[current_node][start_node]
-    # Final validation
-    is_valid = False
-    status = "Infeasible"
-    
-    if route[-1] == start_node and len(route) > 1:
-        if  time_elapsed <= max_d:
-            status = "Optimal"
-            is_valid = True
+
+    is_valid = (route[-1] == start_node and len(route) > 1
+                and time_elapsed <= max_d)
+    status = "Optimal" if is_valid else "Infeasible"
     return status, route, total_reward, time_elapsed, is_valid
+
 
 def solve_lp_relaxation(start_node, time_m, reward_m, max_d, num_n):
     """Solves LP relaxation of the VRP variant for upper bound."""
@@ -376,52 +335,109 @@ def solve_lp_relaxation(start_node, time_m, reward_m, max_d, num_n):
 
     return status, upper_bound
 
+def _node_insertion_pass(route, time_m, reward_m, max_d, num_n):
+    """
+    Intenta insertar nodos no visitados en la mejor posición de la ruta.
+    Acepta la inserción solo si mejora el reward total y es factible en tiempo.
+    Repite hasta que ninguna inserción mejore.
+    """
+    improved = True
+    best_route = route[:]
+    best_reward = sum(reward_m[best_route[k]][best_route[k+1]]
+                      for k in range(len(best_route) - 1))
+    best_time = sum(time_m[best_route[k]][best_route[k+1]]
+                    for k in range(len(best_route) - 1))
+
+    while improved:
+        improved = False
+        visited = set(best_route)
+        unvisited = [n for n in range(num_n) if n not in visited]
+
+        for node in unvisited:
+            if len(best_route) - 1 >= MAX_ARCS:
+                break  # ruta ya en el límite de arcos
+
+            best_gain = 0  # solo aceptar si hay ganancia neta positiva
+            best_pos = None
+
+            for pos in range(1, len(best_route)):
+                a = best_route[pos - 1]
+                b = best_route[pos]
+
+                delta_time = (time_m[a][node] + time_m[node][b]
+                              - time_m[a][b])
+                delta_reward = (reward_m[a][node] + reward_m[node][b]
+                                - reward_m[a][b])
+
+                if best_time + delta_time <= max_d and delta_reward > best_gain:
+                    best_gain = delta_reward
+                    best_pos = pos
+
+            if best_pos is not None:
+                best_route.insert(best_pos, node)
+                best_reward += best_gain
+                best_time = sum(time_m[best_route[k]][best_route[k+1]]
+                                for k in range(len(best_route) - 1))
+                improved = True
+                break  # reiniciar con la ruta actualizada
+
+    return best_route, best_reward, best_time
+
 
 def solve_2opt_heuristic(start_node, time_m, reward_m, max_d, num_n):
-    """
-    2-opt metaheuristic: Improves an initial feasible route by swapping two edges at a time.
-    """
-    # --- Step 1: Get initial feasible route (use greedy heuristic) ---
     status, route, total_reward, total_time, is_valid = solve_heuristic(
         start_node, time_m, reward_m, max_d, num_n
     )
-    if not is_valid: 
+    if not is_valid:
         return status, route, total_reward, total_time, is_valid
 
     best_route = route[:]
     best_reward = total_reward
     best_time = total_time
-    improved = True
+    outer_improved = True
 
-    while improved:
-        improved = False
-        # Try all possible 2-opt swaps (skip start/end node)
-        for i in range(1, len(best_route) - 2):
-            for j in range(i + 1, len(best_route) - 1):
-                # Create new route by reversing segment between i and j
-                new_route = (
-                    best_route[:i] +
-                    best_route[i:j+1][::-1] +
-                    best_route[j+1:]
-                )
-                # Compute total time and reward for new route
-                new_time = 0.0
-                new_reward = 0.0
-                for k in range(len(new_route) - 1):
-                    new_time += time_m[new_route[k]][new_route[k+1]]
-                    new_reward += reward_m[new_route[k]][new_route[k+1]]
-                # Check feasibility
-                if new_time <= max_d and new_route[0] == start_node and new_route[-1] == start_node:
-                    if new_reward > best_reward:
+    while outer_improved:
+        outer_improved = False
+
+        # Fase 1: 2-opt swaps
+        swap_improved = True
+        while swap_improved:
+            swap_improved = False
+            for i in range(1, len(best_route) - 2):
+                for j in range(i + 1, len(best_route) - 1):
+                    new_route = (best_route[:i]
+                                 + best_route[i:j+1][::-1]
+                                 + best_route[j+1:])
+                    new_time = sum(time_m[new_route[k]][new_route[k+1]]
+                                   for k in range(len(new_route) - 1))
+                    new_reward = sum(reward_m[new_route[k]][new_route[k+1]]
+                                     for k in range(len(new_route) - 1))
+                    if (new_time <= max_d
+                            and new_route[0] == start_node
+                            and new_route[-1] == start_node
+                            and new_reward > best_reward):
                         best_route = new_route
                         best_reward = new_reward
                         best_time = new_time
-                        improved = True
-                        break  # Accept first improvement (first-improvement strategy)
-            if improved:
-                break
+                        swap_improved = True
+                        outer_improved = True
+                        break
+                if swap_improved:
+                    break
 
-    is_valid = best_time <= max_d and best_route[0] == start_node and best_route[-1] == start_node
+        # Fase 2: inserción de nodos no visitados
+        inserted_route, inserted_reward, inserted_time = _node_insertion_pass(
+            best_route, time_m, reward_m, max_d, num_n
+        )
+        if inserted_reward > best_reward:
+            best_route = inserted_route
+            best_reward = inserted_reward
+            best_time = inserted_time
+            outer_improved = True
+
+    is_valid = (best_time <= max_d
+                and best_route[0] == start_node
+                and best_route[-1] == start_node)
     status = "Optimal" if is_valid else "Infeasible"
     return status, best_route, best_reward, best_time, is_valid
 
@@ -956,3 +972,149 @@ def _apply_2opt_mutation(route, start_node, time_m, reward_m, max_d):
                 break
     
     return best_route if len(best_route) <= MAX_ROUTE_LEN else None
+
+
+def _apply_lns_mutation(route, start_node, time_m, reward_m, max_d, destroy_size):
+    """
+    LNS mutation operator used by HGA-LNS:
+    1. Destroy: remove `destroy_size` random intermediate nodes
+    2. Repair:  reinsert using best-position greedy strategy
+    3. Refine:  polish geometry with 2-opt
+    Falls back to the original route if repair produces nothing valid.
+    """
+    intermediates = route[1:-1]
+    if len(intermediates) < 2:
+        return route  # too short to destroy meaningfully
+
+    k = min(destroy_size, len(intermediates) - 1)  # keep at least 1 intermediate node
+    removed_idx_set = set(np.random.choice(len(intermediates), k, replace=False).tolist())
+    removed_nodes = [intermediates[i] for i in removed_idx_set]
+    destroyed_route = (
+        [start_node]
+        + [n for i, n in enumerate(intermediates) if i not in removed_idx_set]
+        + [start_node]
+    )
+
+    repaired_route, _, repaired_time = _repair_route_lns_best_position(
+        destroyed_route, removed_nodes, start_node, time_m, reward_m, max_d
+    )
+
+    if repaired_route is None or repaired_time > max_d or len(repaired_route) > MAX_ROUTE_LEN:
+        return route  # fallback to original
+
+    refined = _apply_2opt_mutation(repaired_route, start_node, time_m, reward_m, max_d)
+    if refined and len(refined) <= MAX_ROUTE_LEN:
+        return refined
+    return repaired_route
+
+
+def solve_HGA_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n):
+    """
+    Hybrid Genetic Algorithm – Large Neighborhood Search (HGA-LNS):
+    · GA drives global exploration: diverse population, tournament selection, OX crossover.
+    · LNS destroy/repair replaces classical mutation for targeted local exploitation.
+    · 2-opt refinement polishes each offspring's geometry after repair.
+    Returns: status, route, total_reward, total_duration  (same format as solve_mip)
+    """
+
+    # --- Parameters ---
+    population_size = max(10, num_n * num_n)
+    num_generations  = max(30, num_n * 3)
+    crossover_rate   = 0.6
+    lns_mut_rate     = 0.7   # probability of applying LNS mutation to each offspring
+    elite_size       = max(2, population_size // 5)
+    destroy_size     = max(1, min(2, MAX_ARCS - 2))  # nodes removed per destroy op
+
+    # --- Step 1: Initialize Population (identical seeding strategy to GA) ---
+    population = []
+
+    _, route, reward, duration, is_valid = solve_heuristic(
+        start_node, time_m, reward_m, max_d, num_n
+    )
+    if is_valid and len(route) <= MAX_ROUTE_LEN:
+        population.append({'route': route, 'reward': reward, 'duration': duration})
+
+    for _ in range(max(2, population_size // 4)):
+        route = _generate_route_nearest_neighbor(start_node, time_m, reward_m, max_d, num_n)
+        if route and len(route) <= MAX_ROUTE_LEN:
+            dur = sum(time_m[route[i]][route[i+1]] for i in range(len(route)-1))
+            rew = sum(reward_m[route[i]][route[i+1]] for i in range(len(route)-1))
+            if dur <= max_d:
+                population.append({'route': route, 'reward': rew, 'duration': dur})
+
+    for _ in range(max(2, population_size // 4)):
+        route = _generate_random_feasible_route(start_node, time_m, reward_m, max_d, num_n)
+        if route and len(route) <= MAX_ROUTE_LEN:
+            dur = sum(time_m[route[i]][route[i+1]] for i in range(len(route)-1))
+            rew = sum(reward_m[route[i]][route[i+1]] for i in range(len(route)-1))
+            population.append({'route': route, 'reward': rew, 'duration': dur})
+
+    while len(population) < population_size:
+        route = _generate_route_nearest_neighbor(start_node, time_m, reward_m, max_d, num_n)
+        if route and len(route) <= MAX_ROUTE_LEN:
+            dur = sum(time_m[route[i]][route[i+1]] for i in range(len(route)-1))
+            rew = sum(reward_m[route[i]][route[i+1]] for i in range(len(route)-1))
+            if dur <= max_d:
+                population.append({'route': route, 'reward': rew, 'duration': dur})
+
+    if not population:
+        return "Infeasible", None, -np.inf, np.inf
+
+    best_overall = max(population, key=lambda x: x['reward'])
+
+    # --- Step 2: HGA-LNS Main Loop ---
+    for _ in range(num_generations):
+        population.sort(key=lambda x: x['reward'], reverse=True)
+        elite = population[:elite_size]
+
+        # Tournament selection to fill mating pool
+        mating_pool = elite[:]
+        while len(mating_pool) < population_size:
+            tournament = [population[np.random.randint(0, len(population))] for _ in range(3)]
+            mating_pool.append(max(tournament, key=lambda x: x['reward']))
+
+        # Crossover + LNS-mutation to build offspring
+        offspring = elite[:]
+        while len(offspring) < population_size:
+            if np.random.rand() < crossover_rate:
+                p1 = mating_pool[np.random.randint(0, len(mating_pool))]
+                p2 = mating_pool[np.random.randint(0, len(mating_pool))]
+                child_route = _crossover_routes(
+                    p1['route'], p2['route'], start_node, time_m, reward_m, max_d
+                )
+            else:
+                # No crossover: clone a tournament winner to mutate
+                child_route = mating_pool[np.random.randint(0, len(mating_pool))]['route'][:]
+
+            if not child_route or len(child_route) > MAX_ROUTE_LEN:
+                continue
+
+            # LNS mutation: destroy → repair → 2-opt (replaces classical mutation)
+            if np.random.rand() < lns_mut_rate:
+                child_route = _apply_lns_mutation(
+                    child_route, start_node, time_m, reward_m, max_d, destroy_size
+                )
+
+            if child_route and len(child_route) <= MAX_ROUTE_LEN:
+                child_dur = sum(time_m[child_route[i]][child_route[i+1]]
+                                for i in range(len(child_route)-1))
+                child_rew = sum(reward_m[child_route[i]][child_route[i+1]]
+                                for i in range(len(child_route)-1))
+                if child_dur <= max_d:
+                    offspring.append({'route': child_route, 'reward': child_rew, 'duration': child_dur})
+
+        population = offspring[:population_size]
+
+        current_best = max(population, key=lambda x: x['reward'])
+        if current_best['reward'] > best_overall['reward']:
+            best_overall = current_best
+
+    # --- Final Validation ---
+    is_valid = (
+        best_overall['route'][0] == start_node
+        and best_overall['route'][-1] == start_node
+        and best_overall['duration'] <= max_d
+        and 2 <= len(best_overall['route']) <= MAX_ROUTE_LEN
+    )
+    final_status = "Optimal" if is_valid else "Infeasible"
+    return final_status, best_overall['route'], best_overall['reward'], best_overall['duration']

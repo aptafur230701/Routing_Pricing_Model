@@ -316,7 +316,10 @@ class RoutingEnv(gym.Env):
             or next_time > self.max_duration  # violación dura de tiempo
         )
         # truncated: límite de pasos alcanzado sin terminación natural
-        truncated = (not terminated) and (self._step_count + 1 >= self.max_steps)
+        truncated = (
+            (not terminated)
+            and (self._step_count >= self.max_steps - 1)
+        )
         return terminated, truncated
 
     def _get_action_mask(self) -> np.ndarray:
@@ -343,6 +346,14 @@ class RoutingEnv(gym.Env):
             1 = acción permitida, 0 = acción prohibida.
         """
         mask = np.ones(self.num_nodes, dtype=np.int8)
+
+        remaining_arcs = self.max_steps - self._step_count
+
+        # Si solo queda un arco, el único movimiento válido es volver al depot
+        if remaining_arcs == 1:
+            mask[:] = 0
+            mask[self._start_node] = 1
+            return mask
 
         # Self-loop siempre prohibido
         mask[self._current_node] = 0

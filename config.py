@@ -59,7 +59,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def get_episodes_per_node(num_nodes: int) -> int:
     """Episodes per start-node for the full training run."""
-    if num_nodes <= 10:  return 5000 
+    if num_nodes <= 10:  return 5000
     if num_nodes <= 15:  return 5500
     if num_nodes <= 20:  return 6000
     return 7000
