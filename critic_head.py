@@ -21,9 +21,9 @@ import torch.nn as nn
 
 class CriticHead(nn.Module):
     """
-    MLP de dos capas sobre el vector de contexto h_t → V(s).
+    MLP de tres capas sobre el vector de contexto h_t → V(s).
 
-    Arquitectura: d_h → d_h//2 → ReLU → 1 (lineal)
+    Arquitectura: d_h → d_h → ReLU → d_h//2 → ReLU → 1 (lineal)
 
     El output NO tiene activación final para permitir valores negativos
     (recompensas negativas son posibles en el problema de ruteo).
@@ -36,10 +36,13 @@ class CriticHead(nn.Module):
     def __init__(self, d_h: int):
         super().__init__()
         self.net = nn.Sequential(
+            nn.Linear(d_h, d_h),
+            nn.ReLU(),
             nn.Linear(d_h, d_h // 2),
             nn.ReLU(),
             nn.Linear(d_h // 2, 1),
         )
+
 
     def forward(self, h_t: torch.Tensor) -> torch.Tensor:
         """

@@ -232,6 +232,7 @@ class RoutingEnv(gym.Env):
             else float(self._time_matrix[self._current_node][next_node])
         )
         return self._time_elapsed + float(step_time)
+    
 
     def _compute_reward(
         self, next_node: int, next_time: float, terminated: bool
@@ -276,21 +277,40 @@ class RoutingEnv(gym.Env):
         else:
             step_reward = float(raw_reward) / REWARD_SCALE_FACTOR
 
-        # Bono / penalización terminal
+# ── Bono / penalización terminal ──────────────────────────────────────
         terminal_reward = 0.0
         if terminated:
             if next_node == self._start_node:
-                # Ciclo cerrado: éxito o retorno fuera de tiempo
-                terminal_reward = (
-                    RETURN_SUCCESS_BONUS
-                    if next_time <= self.max_duration
-                    else TIME_VIOLATION_PENALTY
-                )
+                if next_time <= self.max_duration:
+                    n_intermediate = len(self._visited_set) - 1  # excluye el depot
+                    time_util = next_time / self.max_duration
+                    terminal_reward = (
+                        RETURN_SUCCESS_BONUS
+                        + 1.5 * n_intermediate
+                        + 2.0 * time_util
+                    )
+                else:
+                    terminal_reward = TIME_VIOLATION_PENALTY
             else:
-                # Terminación forzada por violación del límite temporal en ruta
                 terminal_reward = TIME_VIOLATION_PENALTY
 
-        return step_reward + terminal_reward
+    # ── Penalización de callejón temporal ────────────────────────────────────────
+    # Solo se activa si el nodo elegido es un callejón real (slack < 0),
+    # es decir, ya no hay forma de regresar al depot dentro del límite.
+    # El factor 0.15 (en lugar de 0.5) evita que esta señal aplaste
+    # el arc_reward de arcos legítimamente rentables pero con tiempo ajustado.
+        temporal_warning = 0.0
+        if not terminated and next_node != self._start_node:
+            t_return = (
+                float(self._time_matrix.iloc[next_node, self._start_node])
+                if hasattr(self._time_matrix, "iloc")
+                else float(self._time_matrix[next_node][self._start_node])
+            )
+            slack = self.max_duration - (next_time + t_return)
+            if slack < 0:
+                temporal_warning = 0.15 * TIME_VIOLATION_PENALTY
+
+        return step_reward + terminal_reward + temporal_warning
 
     def _check_termination(self, next_node: int, next_time: float):
         """

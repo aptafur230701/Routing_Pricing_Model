@@ -29,6 +29,9 @@ import torch
 
 warnings.filterwarnings("ignore")
 
+import sys
+print(sys.executable)
+
 from config import (
     SEED, DEVICE, STOCHASTIC_MODE, NOISE_FRACTION,
     MAX_STEPS_PER_EPISODE, REWARD_SCALE_FACTOR,

@@ -216,15 +216,15 @@ def run_am_training(
     n_heads:                int   = 8,
     n_layers:               int   = 3, 
     d_ff:                   int   = 512,
-    n_episodes_per_update:  int   = 120,
-    n_ppo_epochs:           int   = 6,    
+    n_episodes_per_update:  int   = 240,
+    n_ppo_epochs:           int   = 4,    
     ppo_batch_size:         int   = 64,
-    lr:                     float = 3e-5, 
+    lr:                     float = 1e-4, 
     gamma:                  float = 0.99,
     gae_lambda:             float = 0.95,
-    clip_eps:               float = 0.2,
-    vf_coef:                float = 0.5, 
-    entropy_coef:           float = 0.05,
+    clip_eps:               float = 0.15,
+    #vf_coef:                float = 0.5, 
+    entropy_coef:           float = 0.01,
     grad_clip:              float = 0.5,  
 ) -> tuple:
     """
@@ -259,9 +259,12 @@ def run_am_training(
     agent  = AMRoutingAgent(num_nodes, d_h, n_heads, n_layers, d_ff, device=DEVICE)
     critic = CriticHead(d_h).to(DEVICE)
 
-    optimizer = torch.optim.Adam(
-        list(agent.parameters()) + list(critic.parameters()), lr=lr
-    )
+    # Optimizers separados: el critic necesita converger más rápido que el actor
+    # para dar señales de ventaja de calidad. Con un optimizer compartido y lr=3e-5
+    # el critic aprende demasiado lento y el EV se estanca por debajo de 0.7.
+    # Ratio 10x entre critic y actor es estándar en PPO para problemas combinatorios.
+    actor_optimizer  = torch.optim.Adam(agent.parameters(),  lr=lr)
+    critic_optimizer = torch.optim.Adam(critic.parameters(), lr=lr * 10)
 
     # ── Entorno ───────────────────────────────────────────────────────────────
     _, rm_init = build_day_matrices(
@@ -333,7 +336,11 @@ def run_am_training(
 
                     if truncated:
                         ep_truncated = True
-                        reward += INCOMPLETE_PENALTY
+                        # ANTES: reward += INCOMPLETE_PENALTY
+                        # Esto sumaba el penalty al reward que va al buffer (línea 354)
+                        # y también a ep_reward (línea 360), contándolo dos veces.
+                        # AHORA: solo se registra en ep_reward como señal de diagnóstico,
+                        # pero NO entra al buffer — GAE lo maneja vía last_value.
                         last_value = agent.estimate_value(
                             critic,
                             env.current_node, env.start_node, env.visited_set,
@@ -348,7 +355,7 @@ def run_am_training(
                         current_node=current_node_before_step,
                         mask=mask,
                         action=action,
-                        reward=float(reward),
+                        reward=float(reward),   # reward limpio, sin penalty artificial
                         log_prob=log_prob.item(),
                         value=value,
                         done=done,
@@ -382,6 +389,9 @@ def run_am_training(
         batch_clip_fracs    = []
 
         for _ in range(n_ppo_epochs):
+
+            kl_too_high = False # Flag para detectar si el KL se dispara en este epoch
+
             for _batch_idx, idx_batch in enumerate(buffer.get_batches(ppo_batch_size)):
                 B = len(idx_batch)
 
@@ -451,7 +461,7 @@ def run_am_training(
                     # ── Bonus de entropía (exploración) ─────────────────────
                     entropy_loss = -entropy.mean()
 
-                    loss = actor_loss + vf_coef * value_loss + entropy_coef * entropy_loss
+                    actor_loss_total = actor_loss + entropy_coef * entropy_loss
 
                 except RuntimeError as e:
                     sep = "=" * 60
@@ -482,13 +492,18 @@ def run_am_training(
                     print(sep)
                     raise
 
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(
-                    list(agent.parameters()) + list(critic.parameters()),
-                    grad_clip,
-                )
-                optimizer.step()
+                # ── Update actor & critic ─────────────────────────────────
+                # Ambos .backward() deben ejecutarse antes de cualquier
+                # .step() para evitar que las actualizaciones in-place del
+                # optimizador invaliden el grafo compartido del forward pass.
+                actor_optimizer.zero_grad()
+                critic_optimizer.zero_grad()
+                actor_loss_total.backward(retain_graph=True)
+                value_loss.backward()
+                nn.utils.clip_grad_norm_(agent.parameters(), grad_clip)
+                actor_optimizer.step()
+                nn.utils.clip_grad_norm_(critic.parameters(), grad_clip)
+                critic_optimizer.step()
 
                 with torch.no_grad():
                     # KL aproximada: E[log π_old - log π_new]
@@ -496,12 +511,21 @@ def run_am_training(
                     # Fracción de ratios que el clip PPO recortó
                     clip_frac  = ((ratio - 1).abs() > clip_eps).float().mean().item()
 
-                batch_total_losses.append(loss.item())
+                if approx_kl > 0.05:
+                    kl_too_high = True                   # ← marca la bandera
+                    batch_kl_divs.append(approx_kl)     # ← registra antes de salir
+                    batch_clip_fracs.append(clip_frac)
+                    break     
+                
+                batch_total_losses.append(actor_loss_total.item())
                 batch_actor_losses.append(actor_loss.item())
                 batch_value_losses.append(value_loss.item())
                 batch_entropies.append(entropy.mean().item())
                 batch_kl_divs.append(approx_kl)
                 batch_clip_fracs.append(clip_frac)
+
+            if kl_too_high:  # sale también de n_ppo_epochs
+                break
 
         # Explained variance: cuánto explica el critic los retornos reales
         ret_all = buffer.returns
