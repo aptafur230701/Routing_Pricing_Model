@@ -34,7 +34,7 @@ print(sys.executable)
 
 from config import (
     SEED, DEVICE, STOCHASTIC_MODE, NOISE_FRACTION,
-    MAX_STEPS_PER_EPISODE, REWARD_SCALE_FACTOR,
+    REWARD_SCALE_FACTOR,
     get_episodes_per_node, get_buffer_size,
 )
 from state import get_state_size
@@ -71,7 +71,7 @@ def _run_ddqn(
     state_size          = get_state_size(NUM_NODES)
     episodes_per_node   = get_episodes_per_node(NUM_NODES)
     num_episodes        = episodes_per_node * NUM_NODES
-    epsilon_decay_steps = num_episodes * MAX_STEPS_PER_EPISODE
+    epsilon_decay_steps = num_episodes * NUM_NODES
 
     print(f"Device           : {DEVICE}")
     print(f"State size       : {state_size}  (2 + {NUM_NODES} visited + 2 step)")

@@ -20,7 +20,6 @@ import random
 import numpy as np
 
 from config import (
-    MAX_STEPS_PER_EPISODE,
     MAX_DURATION,
     INCOMPLETE_PENALTY,
     DEVICE,
@@ -111,7 +110,7 @@ def run_training(
     state_size        = get_state_size(num_nodes)
     episodes_per_node = get_episodes_per_node(num_nodes)
     num_episodes      = episodes_per_node * num_nodes
-    total_steps_est   = num_episodes * MAX_STEPS_PER_EPISODE
+    total_steps_est   = num_episodes * num_nodes
     num_days          = rate_stack.shape[0]
 
     # ── Construcción del agente ───────────────────────────────────
@@ -145,7 +144,6 @@ def run_training(
         reward_matrix_penalized=reward_matrix_penalized_init,
         noise_sigma=noise_sigma,
         num_nodes=num_nodes,
-        max_steps=MAX_STEPS_PER_EPISODE,
         max_duration=MAX_DURATION,
     )
 
@@ -182,7 +180,7 @@ def run_training(
         terminated_ep = False
         truncated_ep = False
 
-        for _ in range(MAX_STEPS_PER_EPISODE):
+        for _ in range(num_nodes):  # defensive ceiling; env terminates naturally
             # Convertir action_mask de Gym → invalid_actions del agente
             invalid_actions = _mask_to_invalid(info["action_mask"])
             action = agent.act(obs, invalid_actions=invalid_actions)

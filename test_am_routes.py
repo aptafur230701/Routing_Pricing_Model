@@ -16,7 +16,7 @@ Ejecutar:
 """
 
 import numpy as np
-from config import MAX_DURATION, MAX_STEPS_PER_EPISODE, DEVICE
+from config import MAX_DURATION, DEVICE
 from problem_data import load_matrices, build_day_matrices
 from am_agent import AMRoutingAgent
 
@@ -39,7 +39,6 @@ def main():
     )
     print(f"Día de prueba : {TEST_DAY}")
     print(f"Max duration  : {MAX_DURATION} h")
-    print(f"Max steps     : {MAX_STEPS_PER_EPISODE}")
 
     # ── Instanciar agente (pesos aleatorios) ─────────────────
     agent = AMRoutingAgent(
@@ -66,7 +65,6 @@ def main():
             time_matrix=time_matrix,
             distance_arr=distance_arr,
             max_duration=MAX_DURATION,
-            max_steps=MAX_STEPS_PER_EPISODE,
         )
         valid = route is not None
         if valid:

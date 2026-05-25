@@ -3,27 +3,21 @@ routing_env.py
 ==============
 RoutingEnv: entorno Gymnasium formal para el problema de ruteo estocástico (SDVRP).
 
-Encapsula la dinámica de transición, el cálculo de recompensas y las condiciones
-de terminación que anteriormente estaban dispersas en training.py y tuning.py.
-
 API Gymnasium moderna (estricta):
-  obs, info                           = env.reset(seed=..., options={"start_node": k})
+  obs, info                                = env.reset(seed=..., options={"start_node": k})
   obs, reward, terminated, truncated, info = env.step(action)
 
-El diccionario ``info`` siempre incluye la clave ``action_mask`` (np.int8, 1 = válido,
-0 = prohibido) para que DQNAgent_Optimized.act() pueda aplicar enmascaramiento.
+Condiciones de terminación (exclusivamente):
+  A) El camión regresa al start_node       → terminated=True
+  B) No existe ninguna acción factible     → terminated=True (red de seguridad)
+  truncated siempre es False — ya no hay límite de pasos.
 
-Separación arquitectónica interna (sin lógica monolítica en step):
-  _transition()         — dinámica de movimiento y tiempo
-  _compute_reward()     — recompensa del arco (estocástica o determinista) + bonos terminales
-  _check_termination()  — condiciones de término (terminated / truncated)
-  _get_action_mask()    — máscara binaria de acciones válidas
-
-Compatibilidad:
-  · No modifica agent.py, networks.py, replay_buffer.py, config.py,
-    state.py, environment.py, evaluation.py ni Solvers.py.
-  · Las funciones build_state() y sample_stochastic_reward() se reutilizan
-    directamente desde sus módulos originales.
+La máscara de acciones (info["action_mask"]) excluye:
+  · self-loops
+  · nodos intermedios ya visitados
+  · nodos desde los que no es posible regresar al depot dentro de max_duration
+  start_node siempre permanece válido (la violación de tiempo al regresar la
+  detecta _check_termination, no la máscara).
 """
 
 import numpy as np
@@ -32,7 +26,6 @@ from gymnasium import spaces
 
 from config import (
     STOCHASTIC_MODE,
-    MAX_STEPS_PER_EPISODE,
     MAX_DURATION,
     REWARD_SCALE_FACTOR,
     RETURN_SUCCESS_BONUS,
@@ -47,43 +40,17 @@ class RoutingEnv(gym.Env):
     Entorno Gymnasium para el ruteo estocástico de camiones (SDVRP).
 
     El agente selecciona el nodo destino en cada paso. El episodio termina
-    cuando el camión cierra el ciclo regresando al nodo de inicio (terminated)
-    o cuando se alcanza el límite de pasos (truncated).
+    cuando el camión cierra el ciclo regresando al nodo de inicio (condición A)
+    o cuando no existe ninguna acción factible (condición B — red de seguridad).
+    Ya no existe truncación por número de pasos.
 
     Parámetros
     ----------
     time_matrix              : pd.DataFrame | np.ndarray  (num_nodes × num_nodes)
-        Tiempos de viaje entre pares de nodos (horas).
     reward_matrix_penalized  : pd.DataFrame | np.ndarray  (diagonal = BIG_M_PENALTY)
-        Recompensas brutas por arco; diagonal penalizada para evitar self-loops.
     noise_sigma              : float
-        Desviación estándar del ruido estocástico en las recompensas.
-        En modo determinista (STOCHASTIC_MODE=False) se ignora.
     num_nodes                : int
-        Número de nodos del grafo de ruteo.
-    max_steps                : int, opcional
-        Límite de pasos por episodio. Por defecto: MAX_STEPS_PER_EPISODE.
-    max_duration             : float, opcional
-        Límite de tiempo de operación por episodio (horas). Por defecto: MAX_DURATION.
-
-    Spaces
-    ------
-    action_space      : Discrete(num_nodes)
-    observation_space : Box(float32, shape=(2 + num_nodes + 2,))
-        Layout del vector de estado — ver state.py para el detalle completo.
-
-    Info
-    ----
-    Cada llamada a reset() y step() retorna un dict ``info`` con:
-        "action_mask" : np.ndarray[int8, shape=(num_nodes,)]
-            1 = nodo permitido, 0 = nodo prohibido.
-
-    Notas de escalabilidad
-    ----------------------
-    El entorno es completamente paramétrico: al construirlo con num_nodes=100
-    y las matrices correspondientes escala automáticamente sin cambios de código.
-    Los métodos privados son puntos de extensión naturales para agregar ventanas
-    de tiempo dinámicas, precios de reserva (Pricing Network) o atención.
+    max_duration             : float, opcional (default: MAX_DURATION)
     """
 
     metadata = {"render_modes": []}
@@ -94,20 +61,16 @@ class RoutingEnv(gym.Env):
         reward_matrix_penalized,
         noise_sigma: float,
         num_nodes: int,
-        max_steps: int = MAX_STEPS_PER_EPISODE,
         max_duration: float = MAX_DURATION,
     ):
         super().__init__()
 
-        # ── Datos del problema ────────────────────────────────────
         self._time_matrix = time_matrix
         self._reward_matrix_penalized = reward_matrix_penalized
         self._noise_sigma = noise_sigma
         self.num_nodes = num_nodes
-        self.max_steps = max_steps
         self.max_duration = max_duration
 
-        # ── Espacios de Gymnasium ─────────────────────────────────
         state_size = get_state_size(num_nodes)
         self.action_space = spaces.Discrete(num_nodes)
         self.observation_space = spaces.Box(
@@ -117,7 +80,6 @@ class RoutingEnv(gym.Env):
             dtype=np.float32,
         )
 
-        # ── Estado interno del episodio (inicializado en reset()) ─
         self._start_node: int = None
         self._current_node: int = None
         self._time_elapsed: float = None
@@ -125,25 +87,10 @@ class RoutingEnv(gym.Env):
         self._step_count: int = None
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Ciclo de vida del entorno 
+    # Ciclo de vida del entorno
     # ─────────────────────────────────────────────────────────────────────────
 
     def reset(self, seed: int = None, options: dict = None):
-        """
-        Inicializa un nuevo episodio.
-
-        Parámetros
-        ----------
-        seed    : int, opcional — semilla para reproducibilidad.
-        options : dict, opcional
-            Puede contener ``"start_node"`` (int) para fijar el nodo de inicio.
-            Si se omite, el nodo se selecciona uniformemente al azar.
-
-        Retorna
-        -------
-        obs  : np.ndarray[float32]  — vector de estado inicial.
-        info : dict con ``"action_mask"`` (np.int8 array, shape=(num_nodes,)).
-        """
         super().reset(seed=seed)
 
         if options is not None and "start_node" in options:
@@ -161,28 +108,6 @@ class RoutingEnv(gym.Env):
         return obs, info
 
     def step(self, action: int):
-        """
-        Ejecuta la acción (índice del nodo destino) en el entorno.
-
-        El flujo interno sigue la separación arquitectónica:
-          1. _transition()        — calcula el nuevo tiempo
-          2. _check_termination() — evalúa terminated / truncated
-          3. _compute_reward()    — calcula la recompensa del paso
-          4. Actualización del estado interno
-          5. Construcción de la observación y máscara siguientes
-
-        Parámetros
-        ----------
-        action : int — índice del nodo destino (0..num_nodes-1).
-
-        Retorna
-        -------
-        next_obs   : np.ndarray[float32]
-        reward     : float
-        terminated : bool — True si el camión cerró el ciclo o violó tiempo.
-        truncated  : bool — True si se alcanzó el límite máximo de pasos.
-        info       : dict con ``"action_mask"`` para el siguiente estado.
-        """
         assert self._current_node is not None, (
             "El entorno no está inicializado. Llama env.reset() antes de env.step()."
         )
@@ -192,8 +117,8 @@ class RoutingEnv(gym.Env):
         # 1. Dinámica de transición
         next_time = self._transition(next_node)
 
-        # 2. Condiciones de terminación (antes de actualizar el estado)
-        terminated, truncated = self._check_termination(next_node, next_time)
+        # 2. Condición A: retorno al depot o violación de tiempo
+        terminated = self._check_termination(next_node, next_time)
 
         # 3. Recompensa del paso
         reward = self._compute_reward(next_node, next_time, terminated)
@@ -206,70 +131,36 @@ class RoutingEnv(gym.Env):
 
         # 5. Observación y máscara del siguiente estado
         next_obs = self._build_obs()
-        info = {"action_mask": self._get_action_mask()}
+        next_mask = self._get_action_mask()
 
-        return next_obs, float(reward), terminated, truncated, info
+        # Condición B: si la máscara quedó vacía, terminar limpiamente
+        if not terminated and next_mask.sum() == 0:
+            terminated = True
+
+        info = {"action_mask": next_mask}
+        return next_obs, float(reward), terminated, False, info
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Separación arquitectónica: componentes internos de lógica de negocio
+    # Componentes internos
     # ─────────────────────────────────────────────────────────────────────────
 
     def _transition(self, next_node: int) -> float:
-        """
-        Dinámica de transición: calcula el tiempo acumulado tras el movimiento.
-
-        Parámetros
-        ----------
-        next_node : int — nodo destino.
-
-        Retorna
-        -------
-        float — nuevo tiempo total transcurrido en el episodio.
-        """
         step_time = (
             self._time_matrix.iloc[self._current_node, next_node]
             if hasattr(self._time_matrix, "iloc")
             else float(self._time_matrix[self._current_node][next_node])
         )
         return self._time_elapsed + float(step_time)
-    
 
     def _compute_reward(
         self, next_node: int, next_time: float, terminated: bool
     ) -> float:
-        """
-        Cálculo de recompensa del arco (current_node → next_node).
-
-        Componentes:
-        - Recompensa base estocástica o determinista del arco recorrido.
-          En modo estocástico (STOCHASTIC_MODE=True) aplica ruido gaussiano
-          que modela fluctuaciones de tarifa, cancelaciones y precio de diésel.
-        - Bonificación por retorno exitoso: RETURN_SUCCESS_BONUS si el camión
-          llega al nodo de inicio dentro del límite de tiempo.
-        - Penalización por violación temporal: TIME_VIOLATION_PENALTY si se
-          excede max_duration, ya sea al regresar o durante el trayecto.
-
-        La penalización INCOMPLETE_PENALTY (episodio truncado sin retorno)
-        se aplica externamente en training.py / tuning.py para preservar
-        el comportamiento de memoria adicional del agente.
-
-        Parámetros
-        ----------
-        next_node  : int   — nodo destino del movimiento.
-        next_time  : float — tiempo acumulado tras el movimiento.
-        terminated : bool  — True si el episodio termina en este paso.
-
-        Retorna
-        -------
-        float — recompensa total del paso.
-        """
         raw_reward = (
             self._reward_matrix_penalized.iloc[self._current_node, next_node]
             if hasattr(self._reward_matrix_penalized, "iloc")
             else float(self._reward_matrix_penalized[self._current_node][next_node])
         )
 
-        # Recompensa base: estocástica o determinista
         if STOCHASTIC_MODE and self._noise_sigma > 0:
             step_reward = sample_stochastic_reward(
                 raw_reward, self._noise_sigma, REWARD_SCALE_FACTOR
@@ -277,12 +168,11 @@ class RoutingEnv(gym.Env):
         else:
             step_reward = float(raw_reward) / REWARD_SCALE_FACTOR
 
-# ── Bono / penalización terminal ──────────────────────────────────────
         terminal_reward = 0.0
         if terminated:
             if next_node == self._start_node:
                 if next_time <= self.max_duration:
-                    n_intermediate = len(self._visited_set) - 1  # excluye el depot
+                    n_intermediate = len(self._visited_set) - 1
                     time_util = next_time / self.max_duration
                     terminal_reward = (
                         RETURN_SUCCESS_BONUS
@@ -294,11 +184,7 @@ class RoutingEnv(gym.Env):
             else:
                 terminal_reward = TIME_VIOLATION_PENALTY
 
-    # ── Penalización de callejón temporal ────────────────────────────────────────
-    # Solo se activa si el nodo elegido es un callejón real (slack < 0),
-    # es decir, ya no hay forma de regresar al depot dentro del límite.
-    # El factor 0.05 evita que esta señal aplaste
-    # el arc_reward de arcos legítimamente rentables pero con tiempo ajustado.
+        # Penalización de callejón temporal — solo en pasos no terminales hacia intermedios
         temporal_warning = 0.0
         if not terminated and next_node != self._start_node:
             t_return = (
@@ -312,76 +198,54 @@ class RoutingEnv(gym.Env):
 
         return step_reward + terminal_reward + temporal_warning
 
-    def _check_termination(self, next_node: int, next_time: float):
+    def _check_termination(self, next_node: int, next_time: float) -> bool:
         """
-        Evalúa las condiciones de fin de episodio.
-
-        terminated : True si el camión cerró el ciclo (regresó al start_node)
-                     o si el tiempo acumulado excede max_duration.
-        truncated  : True si se alcanzó el límite de pasos (max_steps) sin
-                     que ocurra terminación natural. Se computa con
-                     ``step_count + 1`` porque step_count aún no fue incrementado.
-
-        Parámetros
-        ----------
-        next_node : int   — nodo destino del movimiento en evaluación.
-        next_time : float — tiempo acumulado si se realiza el movimiento.
-
-        Retorna
-        -------
-        (terminated: bool, truncated: bool)
+        Condición A: el camión cerró el ciclo o excedió el tiempo.
+        Retorna solo terminated (bool). truncated siempre es False.
         """
-        terminated = (
-            next_node == self._start_node   # ciclo cerrado exitosamente
-            or next_time > self.max_duration  # violación dura de tiempo
+        return (
+            next_node == self._start_node
+            or next_time > self.max_duration
         )
-        # truncated: límite de pasos alcanzado sin terminación natural
-        truncated = (
-            (not terminated)
-            and (self._step_count >= self.max_steps - 1)
-        )
-        return terminated, truncated
 
     def _get_action_mask(self) -> np.ndarray:
         """
-        Genera la máscara binaria de acciones válidas para el estado actual.
+        Máscara binaria de acciones válidas para el estado actual.
 
-        Reglas de enmascaramiento:
-        - 0 para self-loop (nodo actual del camión).
-        - 0 para nodos intermedios ya visitados. El nodo de inicio (start_node)
-          permanece disponible (máscara = 1) para que el agente pueda retornar
-          en cualquier paso; no se fuerza el retorno para preservar el espacio
-          de aprendizaje original (el agente aprende a retornar via reward shaping).
-        - 1 para todos los demás nodos no visitados.
-
-        Nota: la factibilidad temporal NO se aplica aquí (durante entrenamiento).
-        El agente aprende a evitar callejones temporales mediante INCOMPLETE_PENALTY
-        y TIME_VIOLATION_PENALTY. Aplicar la máscara de factibilidad en entrenamiento
-        resulta demasiado restrictiva y aumenta el gap vs MIP. El lookahead temporal
-        se aplica únicamente en el rollout greedy de evaluación (evaluation.py).
-
-        Retorna
-        -------
-        np.ndarray[int8, shape=(num_nodes,)]
-            1 = acción permitida, 0 = acción prohibida.
+        Reglas:
+        · 0 para self-loop (nodo actual).
+        · 0 para nodos intermedios ya visitados.
+        · 0 para nodos intermedios desde los que no se puede regresar al depot
+          dentro de max_duration (lookahead temporal).
+        · start_node permanece siempre disponible (mask=1) para permitir retorno;
+          si el tiempo al regresar excede max_duration, _check_termination lo detecta.
         """
         mask = np.ones(self.num_nodes, dtype=np.int8)
 
-        remaining_arcs = self.max_steps - self._step_count
-
-        # Si solo queda un arco, el único movimiento válido es volver al depot
-        if remaining_arcs == 1:
-            mask[:] = 0
-            mask[self._start_node] = 1
-            return mask
-
-        # Self-loop siempre prohibido
+        # Self-loop
         mask[self._current_node] = 0
 
-        # Nodos intermedios ya visitados (start_node queda disponible para retorno)
+        # Intermedios visitados
         for v in self._visited_set:
             if v != self._start_node:
                 mask[v] = 0
+
+        # Lookahead temporal: excluir intermedios que agoten el presupuesto
+        has_iloc = hasattr(self._time_matrix, "iloc")
+        for j in range(self.num_nodes):
+            if mask[j] == 1 and j != self._start_node:
+                t_to_j = (
+                    float(self._time_matrix.iloc[self._current_node, j])
+                    if has_iloc
+                    else float(self._time_matrix[self._current_node][j])
+                )
+                t_j_to_start = (
+                    float(self._time_matrix.iloc[j, self._start_node])
+                    if has_iloc
+                    else float(self._time_matrix[j][self._start_node])
+                )
+                if self._time_elapsed + t_to_j + t_j_to_start > self.max_duration:
+                    mask[j] = 0
 
         return mask
 
@@ -390,49 +254,31 @@ class RoutingEnv(gym.Env):
     # ─────────────────────────────────────────────────────────────────────────
 
     def update_reward_matrix(self, reward_matrix_penalized) -> None:
-        """Replace the reward matrix before the next episode.
-
-        Call this before env.reset() to inject a new day's reward snapshot.
-        Compatible with pd.DataFrame and np.ndarray (same as the constructor).
-        """
+        """Reemplaza la matriz de recompensas antes del próximo episodio."""
         self._reward_matrix_penalized = reward_matrix_penalized
 
     def get_valid_actions(self) -> list:
-        """
-        Retorna la lista de índices de nodos con acción válida en el estado actual.
-
-        Basado en la misma lógica de enmascaramiento de _get_action_mask():
-        excluye self-loops y nodos intermedios visitados; incluye start_node
-        como destino de retorno válido.
-
-        Retorna
-        -------
-        list[int] — índices de acciones permitidas.
-        """
+        """Índices de nodos con acción válida en el estado actual."""
         return [i for i, m in enumerate(self._get_action_mask()) if m == 1]
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Propiedades de solo lectura del estado del episodio
+    # Propiedades de solo lectura
     # ─────────────────────────────────────────────────────────────────────────
 
     @property
     def start_node(self) -> int:
-        """Nodo de inicio del episodio activo."""
         return self._start_node
 
     @property
     def current_node(self) -> int:
-        """Posición actual del camión en el grafo."""
         return self._current_node
 
     @property
     def time_elapsed(self) -> float:
-        """Tiempo acumulado (horas) en el episodio activo."""
         return self._time_elapsed
 
     @property
     def visited_set(self) -> frozenset:
-        """Conjunto inmutable de nodos visitados en el episodio activo."""
         return frozenset(self._visited_set)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -440,13 +286,11 @@ class RoutingEnv(gym.Env):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _build_obs(self) -> np.ndarray:
-        """Construye el vector de observación float32 desde el estado actual."""
         return build_state(
             self._current_node,
             self._time_elapsed,
             self._visited_set,
             self._step_count,
             self.max_duration,
-            self.max_steps,
             self.num_nodes,
         )

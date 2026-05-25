@@ -19,7 +19,6 @@ import optuna
 
 from config import (
     STOCHASTIC_MODE,
-    MAX_STEPS_PER_EPISODE,
     MAX_DURATION,
     INCOMPLETE_PENALTY,
     DEVICE,
@@ -82,7 +81,7 @@ def _run_trial_episode(
     episode_reward = 0.0
     truncated_ep = False
 
-    for _ in range(env.max_steps):
+    for _ in range(env.num_nodes):
         invalid_actions = _mask_to_invalid(info["action_mask"])
         action = agent.act(obs, invalid_actions=invalid_actions)
 
@@ -135,7 +134,7 @@ def _run_validation_episode(
     obs, info = env.reset(options={"start_node": start_node})
     ep_reward = 0.0
 
-    for _ in range(env.max_steps):
+    for _ in range(env.num_nodes):
         invalid_actions = _mask_to_invalid(info["action_mask"])
         action = agent.act(obs, invalid_actions=invalid_actions)
 
@@ -223,7 +222,7 @@ def run_optuna(
         )
 
         num_episodes = _get_optuna_episodes(num_nodes)
-        total_steps_est = num_episodes * MAX_STEPS_PER_EPISODE
+        total_steps_est = num_episodes * num_nodes
 
         # ── Agente del trial ──────────────────────────────────────
         agent = DQNAgent_Optimized(
@@ -257,7 +256,6 @@ def run_optuna(
             reward_matrix_penalized=rm_pen_init,
             noise_sigma=noise_sigma,
             num_nodes=num_nodes,
-            max_steps=MAX_STEPS_PER_EPISODE,
             max_duration=MAX_DURATION,
         )
 

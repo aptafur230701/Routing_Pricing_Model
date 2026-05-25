@@ -7,8 +7,8 @@ State layout (length = 2 + num_nodes + 2):
   [0]           current node index
   [1]           time elapsed / max_duration  (normalised 0-1)
   [2..2+N-1]    one-hot visited encoding     (1 = visited)
-  [2+N]         remaining steps / max_steps  (normalised 0-1)
-  [2+N+1]       current step / max_steps     (normalised 0-1)
+  [2+N]         remaining_nodes_fraction     = (num_nodes - len(visited_set)) / num_nodes
+  [2+N+1]       progress_fraction            = step / num_nodes
 """
 
 import numpy as np
@@ -24,7 +24,6 @@ def build_state(
     visited_set:   set,
     step:          int,
     max_duration:  float,
-    max_steps:     int,
     num_nodes:     int,
 ) -> np.ndarray:
     """Return a float32 state vector of length get_state_size(num_nodes)."""
@@ -37,7 +36,7 @@ def build_state(
         if 0 <= v < num_nodes:
             state[2 + v] = 1.0
 
-    state[2 + num_nodes]     = (max_steps - step) / max_steps   # remaining
-    state[2 + num_nodes + 1] = step / max_steps                  # progress
+    state[2 + num_nodes]     = (num_nodes - len(visited_set)) / num_nodes  # remaining nodes
+    state[2 + num_nodes + 1] = step / max(num_nodes, 1)                    # progress
 
     return state

@@ -28,7 +28,6 @@ import torch
 import torch.nn as nn
 
 from config import (
-    MAX_STEPS_PER_EPISODE,
     MAX_DURATION,
     INCOMPLETE_PENALTY,
     DEVICE,
@@ -319,7 +318,6 @@ def run_am_training(
         reward_matrix_penalized=rm_init,
         noise_sigma=noise_sigma,
         num_nodes=num_nodes,
-        max_steps=MAX_STEPS_PER_EPISODE,
         max_duration=MAX_DURATION,
     )
 
@@ -363,7 +361,7 @@ def run_am_training(
             ep_truncated = False
 
             with torch.no_grad():
-                for step in range(MAX_STEPS_PER_EPISODE):
+                for step in range(num_nodes):  # defensive ceiling; env terminates naturally
                     mask = info["action_mask"]   # (N,) int8
                     current_node_before_step = env.current_node
 
@@ -372,7 +370,7 @@ def run_am_training(
                         env.current_node, env.start_node, env.visited_set,
                         env.time_elapsed, step,
                         rm_pen, time_matrix, distance_arr,
-                        MAX_DURATION, MAX_STEPS_PER_EPISODE,
+                        MAX_DURATION,
                         action_mask=mask,
                     )
 
@@ -391,7 +389,7 @@ def run_am_training(
                             env.current_node, env.start_node, env.visited_set,
                             env.time_elapsed, step + 1,
                             rm_pen, time_matrix, distance_arr,
-                            MAX_DURATION, MAX_STEPS_PER_EPISODE,
+                            MAX_DURATION,
                         )
 
                     buffer.add(

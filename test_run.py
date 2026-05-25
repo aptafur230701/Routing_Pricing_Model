@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from config import (
-    SEED, DEVICE, MAX_STEPS_PER_EPISODE, MAX_DURATION,
+    SEED, DEVICE, MAX_DURATION,
     REWARD_SCALE_FACTOR, RETURN_SUCCESS_BONUS, TIME_VIOLATION_PENALTY,
     INCOMPLETE_PENALTY, STOCHASTIC_MODE,
 )
@@ -65,14 +65,14 @@ def run_test():
         'batch_size':          8,
         'epsilon_start':       1.0,
         'epsilon_end':         0.05,
-        'epsilon_decay_steps': NUM_EPISODES * MAX_STEPS_PER_EPISODE,
+        'epsilon_decay_steps': NUM_EPISODES * NUM_NODES,
         'target_update_freq':  10,
         'hidden1': n2, 'hidden2': n2 * 2,
         'hidden3': n2 * 2, 'hidden4': max(1, n2 // 2),
         'grad_clip': 1.0,
     }
 
-    total_steps_est = NUM_EPISODES * MAX_STEPS_PER_EPISODE
+    total_steps_est = NUM_EPISODES * NUM_NODES
 
     agent = DQNAgent_Optimized(
         state_size=state_size,
@@ -105,11 +105,11 @@ def run_test():
         time_elapsed = 0.0
         visited_set  = {start_node}
         state        = build_state(current_node, time_elapsed, visited_set,
-                                   0, MAX_DURATION, MAX_STEPS_PER_EPISODE, NUM_NODES)
+                                   0, MAX_DURATION, NUM_NODES)
         ep_reward    = 0.0
         done         = False
 
-        for step in range(MAX_STEPS_PER_EPISODE):
+        for step in range(NUM_NODES):
             # BUG 1 FIX: pass invalid_actions so revisits are blocked during training
             action    = agent.act(state, invalid_actions=visited_set - {start_node})
             next_node = action
@@ -126,7 +126,7 @@ def run_test():
             next_time  = time_elapsed + step_time
             visited_next = visited_set | {next_node}
             next_state = build_state(next_node, next_time, visited_next,
-                                     step + 1, MAX_DURATION, MAX_STEPS_PER_EPISODE, NUM_NODES)
+                                     step + 1, MAX_DURATION, NUM_NODES)
 
             terminal_reward = 0.0
             if next_node == start_node:

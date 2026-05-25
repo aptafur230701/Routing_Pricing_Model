@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import torch
 
 from config import (
-    STOCHASTIC_MODE, MAX_DURATION, MAX_STEPS_PER_EPISODE,
+    STOCHASTIC_MODE, MAX_DURATION,
     REWARD_SCALE_FACTOR, RETURN_SUCCESS_BONUS, TIME_VIOLATION_PENALTY,
     N_EVAL_EPISODES, NOISE_FRACTION, SEED,
 )
@@ -33,17 +33,17 @@ from Solvers import (
 # ── Route generation ─────────────────────────────────────────
 def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penalized,
                             num_nodes, max_duration=MAX_DURATION,
-                            max_steps=MAX_STEPS_PER_EPISODE,
                             distance_arr=None):
     """Greedy rollout with the trained agent (epsilon=0, no grad).
 
     Acepta tanto DQNAgent_Optimized como AMRoutingAgent.
     Para AMRoutingAgent se delega a agent.generate_route() directamente.
+    El techo de pasos es num_nodes (defensivo; terminación natural vía depot).
     """
     if hasattr(agent, 'generate_route') and distance_arr is not None:
         return agent.generate_route(
             start_node, reward_matrix_penalized, time_matrix,
-            distance_arr, max_duration, max_steps,
+            distance_arr, max_duration,
         )
 
     agent.epsilon = 0
@@ -54,13 +54,13 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
     visited_set    = {start_node}
     visited_inter  = set()
     state          = build_state(current_node, time_elapsed, visited_set,
-                                 0, max_duration, max_steps, num_nodes)
+                                 0, max_duration, num_nodes)
     route          = [start_node]
     total_reward   = 0.0
     returned_home  = False
 
     with torch.no_grad():
-        for step in range(max_steps):
+        for step in range(num_nodes):  # defensive ceiling
             st = torch.from_numpy(state).float().unsqueeze(0).to(agent.device)
             q  = agent.policy_net(st).cpu().numpy()[0]
 
@@ -116,7 +116,7 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
                 visited_inter.add(current_node)
             visited_set.add(current_node)
             state = build_state(current_node, time_elapsed, visited_set,
-                                step + 1, max_duration, max_steps, num_nodes)
+                                step + 1, max_duration, num_nodes)
 
             if current_node == start_node:
                 returned_home = True

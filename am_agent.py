@@ -4,26 +4,22 @@ am_agent.py
 Agente AM-Actor-Critic mínimo para ruteo.
 
 Combina AttentionEncoder + ContextNetwork + AttentionDecoder en un único
-nn.Module. En esta versión inicial expone:
+nn.Module. Expone:
 
-  generate_route()  — rollout greedy (epsilon=0) para evaluación o validación.
-  act()             — paso estocástico para entrenamiento PPO (próxima fase).
+  generate_route()   — rollout greedy (epsilon=0) para evaluación o validación.
+  act()              — paso estocástico para entrenamiento PPO.
+  act_with_value()   — paso estocástico con estimación de valor (recolección PPO).
+  estimate_value()   — estimación V(s) para bootstrap en episodios truncados.
 
-Los pesos son aleatorios hasta que se entrene con am_training.py.
-La función generate_route() produce rutas válidas desde el primer momento
-gracias al enmascaramiento de acciones heredado de RoutingEnv.
-
-Compatibilidad
---------------
-· routing_env.py, evaluation.py, agent.py → sin cambios.
-· Usa las mismas matrices (reward, time, distance) que el pipeline actual.
+El techo de pasos en generate_route() y en _encode_step() es num_nodes
+(máximo de arcos posibles en un ciclo hamiltoniano), no un conteo arbitrario.
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from config import MAX_DURATION, MAX_STEPS_PER_EPISODE
+from config import MAX_DURATION
 from attention_encoder import (
     AttentionEncoder,
     ContextNetwork,
@@ -40,7 +36,7 @@ class AMRoutingAgent(nn.Module):
 
     Parámetros
     ----------
-    num_nodes : int   — tamaño del grafo (escalable, no fijo en la arquitectura).
+    num_nodes : int   — tamaño del grafo (escalable).
     d_h       : int   — dimensión del embedding (default 128).
     n_heads   : int   — cabezas de atención (default 8, debe dividir d_h).
     n_layers  : int   — capas del encoder Transformer (default 3).
@@ -83,7 +79,6 @@ class AMRoutingAgent(nn.Module):
         time_matrix,
         distance_arr:           np.ndarray,
         max_duration:           float,
-        max_steps:              int,
     ):
         """
         Construye tensores de entrada y ejecuta encoder + context_net.
@@ -101,11 +96,11 @@ class AMRoutingAgent(nn.Module):
             self.num_nodes, max_duration,
         )
         temporal = build_temporal_features(
-            time_elapsed, step_count, max_duration, max_steps
+            time_elapsed, step_count, max_duration, self.num_nodes
         )
 
-        feats_t   = torch.from_numpy(node_feats).unsqueeze(0).to(self.device)  # (1,N,5)
-        temporal_t = torch.from_numpy(temporal).unsqueeze(0).to(self.device)   # (1,3)
+        feats_t    = torch.from_numpy(node_feats).unsqueeze(0).to(self.device)   # (1,N,5)
+        temporal_t = torch.from_numpy(temporal).unsqueeze(0).to(self.device)     # (1,3)
 
         embeddings, graph_emb = self.encoder(feats_t)               # (1,N,d_h), (1,d_h)
         current_emb = embeddings[:, current_node, :]                # (1, d_h)
@@ -126,11 +121,11 @@ class AMRoutingAgent(nn.Module):
         Retorna Tensor (1, N) int8.
         """
         mask = np.ones(num_nodes, dtype=np.int8)
-        mask[current_node] = 0                         # self-loop
+        mask[current_node] = 0
         for v in visited_set:
             if v != start_node:
-                mask[v] = 0                            # intermedios visitados
-        return torch.from_numpy(mask).unsqueeze(0)     # (1, N)
+                mask[v] = 0
+        return torch.from_numpy(mask).unsqueeze(0)
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -138,32 +133,23 @@ class AMRoutingAgent(nn.Module):
     def generate_route(
         self,
         start_node:             int,
-        reward_matrix_penalized,        # pd.DataFrame | np.ndarray (N×N)
-        time_matrix,                    # pd.DataFrame | np.ndarray (N×N)
+        reward_matrix_penalized,
+        time_matrix,
         distance_arr:           np.ndarray,
         max_duration:           float = MAX_DURATION,
-        max_steps:              int   = MAX_STEPS_PER_EPISODE,
     ):
         """
         Rollout greedy (sin gradientes) con el modelo actual.
 
-        Usa la misma lógica de enmascaramiento temporal que evaluation.py
-        para garantizar rutas válidas (ciclos cerrados).
-
-        Parámetros
-        ----------
-        start_node              : nodo de inicio del episodio.
-        reward_matrix_penalized : matriz de recompensas del día (con diagonal BIG_M).
-        time_matrix             : matriz de tiempos de viaje.
-        distance_arr            : matriz de distancias.
-        max_duration            : límite temporal (horas).
-        max_steps               : límite de pasos por episodio.
+        El techo de pasos es self.num_nodes — techo defensivo contra bucles
+        infinitos; la terminación natural ocurre al regresar al depot o cuando
+        ningún nodo intermedio es factible temporalmente.
 
         Retorna
         -------
-        route        : list[int] | None  — ruta completa si es ciclo válido.
-        total_reward : float             — recompensa cruda acumulada (-inf si inválida).
-        time_elapsed : float             — duración total de la ruta.
+        route        : list[int] | None
+        total_reward : float
+        time_elapsed : float
         """
         self.eval()
 
@@ -178,12 +164,12 @@ class AMRoutingAgent(nn.Module):
         total_reward  = 0.0
         returned_home = False
 
-        for step in range(max_steps-1):
+        for step in range(self.num_nodes):
             embeddings, h_t, _, _ = self._encode_step(
                 current_node, start_node, visited_set,
                 time_elapsed, step,
                 reward_matrix_penalized, time_matrix, distance_arr,
-                max_duration, max_steps,
+                max_duration,
             )
 
             # Máscara base: self-loop + intermedios visitados
@@ -191,7 +177,7 @@ class AMRoutingAgent(nn.Module):
                 current_node, start_node, visited_set, self.num_nodes
             ).to(self.device)
 
-            # Máscara temporal: eliminar nodos desde los que no se puede volver
+            # Lookahead temporal: excluir intermedios que impidan el retorno
             mask_np = mask.cpu().numpy()[0]
             for j in range(self.num_nodes):
                 if mask_np[j] == 1 and j != start_node:
@@ -207,7 +193,7 @@ class AMRoutingAgent(nn.Module):
                         mask_np[j] = 0
             mask = torch.from_numpy(mask_np).unsqueeze(0).to(self.device)
 
-            # Si todos los nodos intermedios quedaron bloqueados → forzar retorno
+            # Si todos los intermedios están bloqueados → forzar retorno
             valid_non_start = [j for j in range(self.num_nodes)
                                if mask_np[j] == 1 and j != start_node]
             if not valid_non_start and current_node != start_node:
@@ -215,7 +201,6 @@ class AMRoutingAgent(nn.Module):
             else:
                 next_node = int(self.decoder.greedy_action(h_t, embeddings, mask))
 
-            # Tiempo y recompensa del arco
             step_time = (
                 float(time_matrix.iloc[current_node, next_node])
                 if has_iloc_t else float(time_matrix[current_node][next_node])
@@ -225,7 +210,6 @@ class AMRoutingAgent(nn.Module):
                 if has_iloc else float(reward_matrix_penalized[current_node][next_node])
             )
 
-            # Verificar límite temporal (solo para nodos intermedios)
             if time_elapsed + step_time > max_duration + 1e-6 and next_node != start_node:
                 break
 
@@ -282,7 +266,6 @@ class AMRoutingAgent(nn.Module):
         time_matrix,
         distance_arr:           np.ndarray,
         max_duration:           float,
-        max_steps:              int,
         action_mask:            np.ndarray,   # (N,) int8 de RoutingEnv
     ):
         """
@@ -298,7 +281,7 @@ class AMRoutingAgent(nn.Module):
             current_node, start_node, visited_set,
             time_elapsed, step_count,
             reward_matrix_penalized, time_matrix, distance_arr,
-            max_duration, max_steps,
+            max_duration,
         )
         mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
         action_t, log_prob, entropy = self.decoder.act(h_t, embeddings, mask_t)
@@ -316,7 +299,6 @@ class AMRoutingAgent(nn.Module):
         time_matrix,
         distance_arr:           np.ndarray,
         max_duration:           float,
-        max_steps:              int,
         action_mask:            np.ndarray,   # (N,) int8 de RoutingEnv
     ):
         """
@@ -328,14 +310,14 @@ class AMRoutingAgent(nn.Module):
         log_prob   : Tensor escalar
         entropy    : Tensor escalar
         value      : float
-        node_feats : np.ndarray (N, 5)  — para almacenar en RolloutBuffer
-        temporal   : np.ndarray (3,)    — para almacenar en RolloutBuffer
+        node_feats : np.ndarray (N, 5)
+        temporal   : np.ndarray (3,)
         """
         embeddings, h_t, node_feats, temporal = self._encode_step(
             current_node, start_node, visited_set,
             time_elapsed, step_count,
             reward_matrix_penalized, time_matrix, distance_arr,
-            max_duration, max_steps,
+            max_duration,
         )
         value  = critic(h_t).item()
         mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
@@ -354,15 +336,12 @@ class AMRoutingAgent(nn.Module):
         time_matrix,
         distance_arr:           np.ndarray,
         max_duration:           float,
-        max_steps:              int,
     ) -> float:
-        """
-        Estima V(s) para bootstrap en episodios truncados.
-        """
+        """Estima V(s) para bootstrap en episodios truncados."""
         _, h_t, _, _ = self._encode_step(
             current_node, start_node, visited_set,
             time_elapsed, step_count,
             reward_matrix_penalized, time_matrix, distance_arr,
-            max_duration, max_steps,
+            max_duration,
         )
         return critic(h_t).item()

@@ -323,19 +323,20 @@ def build_temporal_features(
     time_elapsed: float,
     step_count:   int,
     max_duration: float,
-    max_steps:    int,
+    num_nodes:    int,
 ) -> np.ndarray:
     """
     Construye el vector de features temporales (3,) para ContextNetwork.
 
-    [0] time_norm           = time_elapsed / max_duration  (0-1)
-    [1] remaining_steps_norm = (max_steps - step_count) / max_steps  (0-1)
-    [2] progress_norm        = step_count / max_steps  (0-1)
+    [0] elapsed_time_norm   = time_elapsed / max_duration           (0-1)
+    [1] remaining_time_norm = max(0, max_duration - time_elapsed) / max_duration  (0-1)
+    [2] progress_fraction   = step_count / num_nodes                (0-1)
 
-    Compatible con el layout de state.py para facilitar comparaciones.
+    El tensor sigue siendo shape (3,) — sin cambio de dimensión.
     """
+    denom = max(max_duration, 1e-6)
     return np.array([
-        min(time_elapsed, max_duration) / max(max_duration, 1e-6),
-        (max_steps - step_count) / max(max_steps, 1),
-        step_count / max(max_steps, 1),
+        min(time_elapsed, max_duration) / denom,
+        max(0.0, max_duration - time_elapsed) / denom,
+        step_count / max(num_nodes, 1),
     ], dtype=np.float32)
