@@ -64,7 +64,9 @@ class RolloutBuffer:
         self.old_log_probs = []   # list of float
         self.old_values    = []   # list of float
         self.dones         = []   # list of bool
-        # Calculados por compute_gae()
+        # (start_idx, end_idx, last_value, ep_truncated) por episodio
+        self.episode_boundaries = []
+        # Calculados por compute_gae_per_episode()
         self.returns       = None
         self.advantages    = None
 
@@ -118,6 +120,48 @@ class RolloutBuffer:
             gae   = delta + gamma * gae_lambda * (1 - dones[t]) * gae
             advantages[t] = gae
             returns[t]    = gae + values[t]
+
+        self.returns    = returns
+        self.advantages = advantages
+
+    def compute_gae_per_episode(
+        self,
+        gamma:      float = 0.99,
+        gae_lambda: float = 0.95,
+    ):
+        """
+        Calcula retornos y ventajas con GAE usando el last_value correcto de
+        cada episodio registrado en episode_boundaries.
+
+        Cada episodio se procesa en forma independiente: el bootstrap del
+        último paso usa last_value si fue truncado, 0 si terminó naturalmente.
+        No se usa la máscara dones dentro del segmento porque el loop de
+        recolección rompe en done=True, garantizando que ningún paso
+        intermedio tenga done=True.
+        """
+        n = len(self.rewards)
+        returns    = np.zeros(n, dtype=np.float32)
+        advantages = np.zeros(n, dtype=np.float32)
+
+        for start_idx, end_idx, last_value, ep_truncated in self.episode_boundaries:
+            seg_len   = end_idx - start_idx
+            bootstrap = last_value if ep_truncated else 0.0
+
+            seg_values = np.array(
+                self.old_values[start_idx:end_idx] + [bootstrap],
+                dtype=np.float32,
+            )
+
+            gae = 0.0
+            for t in reversed(range(seg_len)):
+                delta = (
+                    self.rewards[start_idx + t]
+                    + gamma * seg_values[t + 1]
+                    - seg_values[t]
+                )
+                gae                        = delta + gamma * gae_lambda * gae
+                advantages[start_idx + t]  = gae
+                returns[start_idx + t]     = gae + seg_values[t]
 
         self.returns    = returns
         self.advantages = advantages
@@ -313,6 +357,7 @@ def run_am_training(
             env.update_reward_matrix(rm_pen)
             obs, info = env.reset(options={"start_node": start_node})
 
+            ep_start_idx = len(buffer)
             ep_reward    = 0.0
             last_value   = 0.0
             ep_truncated = False
@@ -367,15 +412,13 @@ def run_am_training(
                     if done:
                         break
 
+            buffer.episode_boundaries.append(
+                (ep_start_idx, len(buffer), last_value, ep_truncated)
+            )
             update_ep_rewards.append(ep_reward)
             episode_rewards.append(ep_reward)
 
-        # GAE con last_value=0 si el último episodio terminó naturalmente
-        buffer.compute_gae(
-            last_value=last_value if ep_truncated else 0.0,
-            gamma=gamma,
-            gae_lambda=gae_lambda,
-        )
+        buffer.compute_gae_per_episode(gamma=gamma, gae_lambda=gae_lambda)
 
         # ── Fase 2: Actualización PPO ─────────────────────────────────────────
         agent.train()

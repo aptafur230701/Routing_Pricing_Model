@@ -286,8 +286,8 @@ class RoutingEnv(gym.Env):
                     time_util = next_time / self.max_duration
                     terminal_reward = (
                         RETURN_SUCCESS_BONUS
-                        + 1.5 * n_intermediate
-                        + 2.0 * time_util
+                        + (RETURN_SUCCESS_BONUS * 0.5) * (n_intermediate / (self.num_nodes - 1))
+                        + (RETURN_SUCCESS_BONUS * 0.3) * time_util
                     )
                 else:
                     terminal_reward = TIME_VIOLATION_PENALTY
@@ -297,7 +297,7 @@ class RoutingEnv(gym.Env):
     # ── Penalización de callejón temporal ────────────────────────────────────────
     # Solo se activa si el nodo elegido es un callejón real (slack < 0),
     # es decir, ya no hay forma de regresar al depot dentro del límite.
-    # El factor 0.15 (en lugar de 0.5) evita que esta señal aplaste
+    # El factor 0.05 evita que esta señal aplaste
     # el arc_reward de arcos legítimamente rentables pero con tiempo ajustado.
         temporal_warning = 0.0
         if not terminated and next_node != self._start_node:
@@ -308,7 +308,7 @@ class RoutingEnv(gym.Env):
             )
             slack = self.max_duration - (next_time + t_return)
             if slack < 0:
-                temporal_warning = 0.15 * TIME_VIOLATION_PENALTY
+                temporal_warning = 0.05 * TIME_VIOLATION_PENALTY
 
         return step_reward + terminal_reward + temporal_warning
 

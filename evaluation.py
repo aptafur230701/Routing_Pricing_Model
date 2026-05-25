@@ -19,7 +19,7 @@ import torch
 from config import (
     STOCHASTIC_MODE, MAX_DURATION, MAX_STEPS_PER_EPISODE,
     REWARD_SCALE_FACTOR, RETURN_SUCCESS_BONUS, TIME_VIOLATION_PENALTY,
-    N_EVAL_EPISODES, NOISE_FRACTION,
+    N_EVAL_EPISODES, NOISE_FRACTION, SEED,
 )
 from state import build_state
 from problem_data import sample_stochastic_reward, build_day_matrices
@@ -211,6 +211,7 @@ def run_solver_comparison(agent, time_matrix,
     lns_times         = []
     hga_lns_times     = []
     num_days          = rate_stack.shape[0]
+    np.random.seed(SEED)
 
     print("\n--- Solver Comparison ---")
     for s in range(num_nodes):
@@ -336,10 +337,12 @@ def run_solver_comparison(agent, time_matrix,
                 return ((mip_r - solver_r) / abs(mip_r)) * 100
             return float('nan')
 
-        row['DRL Gap (%)']       = gap(row['DRL Det Reward'],  row['DRL Valid'])
-        row['Heuristic Gap (%)'] = gap(row['Heuristic Reward'],   row['Heuristic Valid'])
-        row['2Opt Gap (%)']      = gap(row['2Opt Reward'],        row['2Opt Valid'])
-        row['LNS Gap (%)']       = gap(row['LNS Reward'],         row['LNS Valid'])
+        row['DRL Gap (%)']       = gap(row['DRL Det Reward'],    row['DRL Valid'])
+        row['Heuristic Gap (%)'] = gap(row['Heuristic Reward'], row['Heuristic Valid'])
+        row['2Opt Gap (%)']      = gap(row['2Opt Reward'],      row['2Opt Valid'])
+        row['GA Gap (%)']        = gap(row['GA Reward'],        row['GA Valid'])
+        row['LNS Gap (%)']       = gap(row['LNS Reward'],       row['LNS Valid'])
+        row['HGA-LNS Gap (%)']   = gap(row['HGA-LNS Reward'],  row['HGA-LNS Valid'])
         results.append(row)
 
     df = pd.DataFrame(results)
