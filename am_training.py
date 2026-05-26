@@ -266,8 +266,7 @@ def run_am_training(
     gamma:                  float = 0.99,
     gae_lambda:             float = 0.95,
     clip_eps:               float = 0.15,
-    #vf_coef:                float = 0.5, 
-    entropy_coef:           float = 0.01,
+    entropy_coef:           float = 0.03,
     grad_clip:              float = 0.5,  
 ) -> tuple:
     """
