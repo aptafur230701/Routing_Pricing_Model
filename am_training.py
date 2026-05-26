@@ -259,14 +259,14 @@ def run_am_training(
     n_heads:                int   = 8,
     n_layers:               int   = 3, 
     d_ff:                   int   = 512,
-    n_episodes_per_update:  int   = 240,
+    n_episodes_per_update:  int   = 360,
     n_ppo_epochs:           int   = 4,    
     ppo_batch_size:         int   = 64,
     lr:                     float = 1e-4, 
     gamma:                  float = 0.99,
     gae_lambda:             float = 0.95,
     clip_eps:               float = 0.15,
-    entropy_coef:           float = 0.03,
+    entropy_coef:           float = 0.05,
     grad_clip:              float = 0.5,  
 ) -> tuple:
     """
