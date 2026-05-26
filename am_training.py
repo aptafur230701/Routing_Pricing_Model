@@ -16,7 +16,7 @@ Interfaz análoga a run_training() de training.py:
         noise_sigma, num_nodes
     )
 
-· Usa RoutingEnv como entorno estándar (misma API Gymnasium).
+· Usa RoutingEnv como entorno estándar (Siguiendo practicas de API Gymnasium).
 """
 
 import random
