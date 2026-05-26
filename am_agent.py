@@ -137,9 +137,14 @@ class AMRoutingAgent(nn.Module):
         time_matrix,
         distance_arr:           np.ndarray,
         max_duration:           float = MAX_DURATION,
+        beam_width:             int   = 1,
     ):
         """
         Rollout greedy (sin gradientes) con el modelo actual.
+
+        Con beam_width=1 el comportamiento es idéntico al greedy original.
+        Con beam_width>1 se activa beam search: se mantienen los k mejores
+        caminos parciales ordenados por total_reward acumulado.
 
         El techo de pasos es self.num_nodes — techo defensivo contra bucles
         infinitos; la terminación natural ocurre al regresar al depot o cuando
@@ -156,104 +161,257 @@ class AMRoutingAgent(nn.Module):
         has_iloc   = hasattr(reward_matrix_penalized, "iloc")
         has_iloc_t = hasattr(time_matrix, "iloc")
 
-        current_node  = start_node
-        time_elapsed  = 0.0
-        visited_set   = {start_node}
-        visited_inter = set()
-        route         = [start_node]
-        total_reward  = 0.0
-        returned_home = False
+        if beam_width <= 1:
+            # ── Modo greedy original (beam_width=1) ───────────────────────────
+            current_node  = start_node
+            time_elapsed  = 0.0
+            visited_set   = {start_node}
+            visited_inter = set()
+            route         = [start_node]
+            total_reward  = 0.0
+            returned_home = False
 
-        for step in range(self.num_nodes):
-            embeddings, h_t, _, _ = self._encode_step(
-                current_node, start_node, visited_set,
-                time_elapsed, step,
-                reward_matrix_penalized, time_matrix, distance_arr,
-                max_duration,
+            for step in range(self.num_nodes):
+                embeddings, h_t, _, _ = self._encode_step(
+                    current_node, start_node, visited_set,
+                    time_elapsed, step,
+                    reward_matrix_penalized, time_matrix, distance_arr,
+                    max_duration,
+                )
+
+                # Máscara base: self-loop + intermedios visitados
+                mask = self._build_mask(
+                    current_node, start_node, visited_set, self.num_nodes
+                ).to(self.device)
+
+                # Lookahead temporal: excluir intermedios que impidan el retorno
+                mask_np = mask.cpu().numpy()[0]
+                for j in range(self.num_nodes):
+                    if mask_np[j] == 1 and j != start_node:
+                        t_to_j = (
+                            float(time_matrix.iloc[current_node, j])
+                            if has_iloc_t else float(time_matrix[current_node][j])
+                        )
+                        t_j_start = (
+                            float(time_matrix.iloc[j, start_node])
+                            if has_iloc_t else float(time_matrix[j][start_node])
+                        )
+                        if time_elapsed + t_to_j + t_j_start > max_duration + 1e-6:
+                            mask_np[j] = 0
+                mask = torch.from_numpy(mask_np).unsqueeze(0).to(self.device)
+
+                # Si todos los intermedios están bloqueados → forzar retorno
+                valid_non_start = [j for j in range(self.num_nodes)
+                                   if mask_np[j] == 1 and j != start_node]
+                if not valid_non_start and current_node != start_node:
+                    next_node = start_node
+                else:
+                    next_node = int(self.decoder.greedy_action(h_t, embeddings, mask))
+
+                step_time = (
+                    float(time_matrix.iloc[current_node, next_node])
+                    if has_iloc_t else float(time_matrix[current_node][next_node])
+                )
+                step_reward = (
+                    float(reward_matrix_penalized.iloc[current_node, next_node])
+                    if has_iloc else float(reward_matrix_penalized[current_node][next_node])
+                )
+
+                if time_elapsed + step_time > max_duration + 1e-6 and next_node != start_node:
+                    break
+
+                time_elapsed  += step_time
+                total_reward  += step_reward
+                current_node   = next_node
+                route.append(current_node)
+
+                if current_node != start_node:
+                    visited_inter.add(current_node)
+                visited_set.add(current_node)
+
+                if current_node == start_node:
+                    returned_home = True
+                    break
+
+            # Intento de retorno forzado si no cerró el ciclo
+            if not returned_home and current_node != start_node:
+                t_ret = (
+                    float(time_matrix.iloc[current_node, start_node])
+                    if has_iloc_t else float(time_matrix[current_node][start_node])
+                )
+                r_ret = (
+                    float(reward_matrix_penalized.iloc[current_node, start_node])
+                    if has_iloc else float(reward_matrix_penalized[current_node][start_node])
+                )
+                if time_elapsed + t_ret <= max_duration + 1e-6:
+                    time_elapsed += t_ret
+                    total_reward += r_ret
+                    route.append(start_node)
+                    returned_home = True
+
+            self.train()
+
+            is_valid = (
+                returned_home
+                and len(route) > 1
+                and route[0] == start_node
+                and route[-1] == start_node
             )
+            if not is_valid:
+                return None, -np.inf, np.inf
 
-            # Máscara base: self-loop + intermedios visitados
-            mask = self._build_mask(
-                current_node, start_node, visited_set, self.num_nodes
-            ).to(self.device)
+            return route, total_reward, time_elapsed
 
-            # Lookahead temporal: excluir intermedios que impidan el retorno
-            mask_np = mask.cpu().numpy()[0]
-            for j in range(self.num_nodes):
-                if mask_np[j] == 1 and j != start_node:
-                    t_to_j = (
-                        float(time_matrix.iloc[current_node, j])
-                        if has_iloc_t else float(time_matrix[current_node][j])
+        else:
+            # ── Modo beam search (beam_width > 1) ────────────────────────────
+            beams = [{
+                "current_node":  start_node,
+                "time_elapsed":  0.0,
+                "visited_set":   {start_node},
+                "visited_inter": set(),
+                "route":         [start_node],
+                "total_reward":  0.0,
+                "returned_home": False,
+            }]
+
+            with torch.no_grad():
+                for step in range(self.num_nodes):
+                    next_beams = []
+
+                    for beam in beams:
+                        if beam["returned_home"]:
+                            next_beams.append(beam)
+                            continue
+
+                        current_node = beam["current_node"]
+                        time_elapsed = beam["time_elapsed"]
+                        visited_set  = set(beam["visited_set"])
+
+                        embeddings, h_t, _, _ = self._encode_step(
+                            current_node, start_node, visited_set,
+                            time_elapsed, step,
+                            reward_matrix_penalized, time_matrix, distance_arr,
+                            max_duration,
+                        )
+
+                        # Máscara base: self-loop + intermedios visitados
+                        mask_int = self._build_mask(
+                            current_node, start_node, visited_set, self.num_nodes
+                        ).to(self.device)
+
+                        # Lookahead temporal: excluir intermedios que impidan el retorno
+                        mask_np = mask_int.cpu().numpy()[0]
+                        for j in range(self.num_nodes):
+                            if mask_np[j] == 1 and j != start_node:
+                                t_to_j = (
+                                    float(time_matrix.iloc[current_node, j])
+                                    if has_iloc_t else float(time_matrix[current_node][j])
+                                )
+                                t_j_start = (
+                                    float(time_matrix.iloc[j, start_node])
+                                    if has_iloc_t else float(time_matrix[j][start_node])
+                                )
+                                if time_elapsed + t_to_j + t_j_start > max_duration + 1e-6:
+                                    mask_np[j] = 0
+
+                        valid_non_start = [j for j in range(self.num_nodes)
+                                           if mask_np[j] == 1 and j != start_node]
+
+                        if not valid_non_start and current_node != start_node:
+                            # Forzar retorno al depot como único candidato
+                            candidate_nodes = [start_node]
+                        else:
+                            # Obtener logits del decoder sin samplear
+                            bool_mask = (mask_int == 0)   # True = inválido, (1, N)
+                            logits = self.decoder._logits(h_t, embeddings, bool_mask)  # (1, N)
+                            logits_np = logits[0].cpu().numpy()
+
+                            valid_nodes = [j for j in range(self.num_nodes)
+                                           if mask_np[j] == 1]
+                            if not valid_nodes:
+                                next_beams.append(beam)
+                                continue
+
+                            # Top-k nodos válidos por logit
+                            valid_nodes.sort(key=lambda j: logits_np[j], reverse=True)
+                            candidate_nodes = valid_nodes[:beam_width]
+
+                        # Crear beams hijos para cada candidato
+                        for next_node in candidate_nodes:
+                            step_time = (
+                                float(time_matrix.iloc[current_node, next_node])
+                                if has_iloc_t else float(time_matrix[current_node][next_node])
+                            )
+                            step_reward = (
+                                float(reward_matrix_penalized.iloc[current_node, next_node])
+                                if has_iloc else float(reward_matrix_penalized[current_node][next_node])
+                            )
+
+                            if time_elapsed + step_time > max_duration + 1e-6 and next_node != start_node:
+                                continue
+
+                            new_visited_set   = set(visited_set)
+                            new_visited_inter = set(beam["visited_inter"])
+                            new_visited_set.add(next_node)
+                            if next_node != start_node:
+                                new_visited_inter.add(next_node)
+
+                            next_beams.append({
+                                "current_node":  next_node,
+                                "time_elapsed":  time_elapsed + step_time,
+                                "visited_set":   new_visited_set,
+                                "visited_inter": new_visited_inter,
+                                "route":         beam["route"] + [next_node],
+                                "total_reward":  beam["total_reward"] + step_reward,
+                                "returned_home": next_node == start_node,
+                            })
+
+                    if not next_beams:
+                        break
+
+                    next_beams.sort(key=lambda b: b["total_reward"], reverse=True)
+                    beams = next_beams[:beam_width]
+
+                    if all(b["returned_home"] for b in beams):
+                        break
+
+            # Intento de retorno forzado para beams que no cerraron el ciclo
+            for beam in beams:
+                if not beam["returned_home"] and beam["current_node"] != start_node:
+                    cn = beam["current_node"]
+                    t_ret = (
+                        float(time_matrix.iloc[cn, start_node])
+                        if has_iloc_t else float(time_matrix[cn][start_node])
                     )
-                    t_j_start = (
-                        float(time_matrix.iloc[j, start_node])
-                        if has_iloc_t else float(time_matrix[j][start_node])
+                    r_ret = (
+                        float(reward_matrix_penalized.iloc[cn, start_node])
+                        if has_iloc else float(reward_matrix_penalized[cn][start_node])
                     )
-                    if time_elapsed + t_to_j + t_j_start > max_duration + 1e-6:
-                        mask_np[j] = 0
-            mask = torch.from_numpy(mask_np).unsqueeze(0).to(self.device)
+                    if beam["time_elapsed"] + t_ret <= max_duration + 1e-6:
+                        beam["time_elapsed"] += t_ret
+                        beam["total_reward"] += r_ret
+                        beam["route"].append(start_node)
+                        beam["returned_home"] = True
 
-            # Si todos los intermedios están bloqueados → forzar retorno
-            valid_non_start = [j for j in range(self.num_nodes)
-                               if mask_np[j] == 1 and j != start_node]
-            if not valid_non_start and current_node != start_node:
-                next_node = start_node
-            else:
-                next_node = int(self.decoder.greedy_action(h_t, embeddings, mask))
+            self.train()
 
-            step_time = (
-                float(time_matrix.iloc[current_node, next_node])
-                if has_iloc_t else float(time_matrix[current_node][next_node])
-            )
-            step_reward = (
-                float(reward_matrix_penalized.iloc[current_node, next_node])
-                if has_iloc else float(reward_matrix_penalized[current_node][next_node])
-            )
+            best_beam   = None
+            best_reward = -np.inf
+            for beam in beams:
+                is_valid = (
+                    beam["returned_home"]
+                    and len(beam["route"]) > 1
+                    and beam["route"][0] == start_node
+                    and beam["route"][-1] == start_node
+                )
+                if is_valid and beam["total_reward"] > best_reward:
+                    best_reward = beam["total_reward"]
+                    best_beam   = beam
 
-            if time_elapsed + step_time > max_duration + 1e-6 and next_node != start_node:
-                break
+            if best_beam is None:
+                return None, -np.inf, np.inf
 
-            time_elapsed  += step_time
-            total_reward  += step_reward
-            current_node   = next_node
-            route.append(current_node)
-
-            if current_node != start_node:
-                visited_inter.add(current_node)
-            visited_set.add(current_node)
-
-            if current_node == start_node:
-                returned_home = True
-                break
-
-        # Intento de retorno forzado si no cerró el ciclo
-        if not returned_home and current_node != start_node:
-            t_ret = (
-                float(time_matrix.iloc[current_node, start_node])
-                if has_iloc_t else float(time_matrix[current_node][start_node])
-            )
-            r_ret = (
-                float(reward_matrix_penalized.iloc[current_node, start_node])
-                if has_iloc else float(reward_matrix_penalized[current_node][start_node])
-            )
-            if time_elapsed + t_ret <= max_duration + 1e-6:
-                time_elapsed += t_ret
-                total_reward += r_ret
-                route.append(start_node)
-                returned_home = True
-
-        self.train()
-
-        is_valid = (
-            returned_home
-            and len(route) > 1
-            and route[0] == start_node
-            and route[-1] == start_node
-        )
-        if not is_valid:
-            return None, -np.inf, np.inf
-
-        return route, total_reward, time_elapsed
+            return best_beam["route"], best_beam["total_reward"], best_beam["time_elapsed"]
 
     def act(
         self,

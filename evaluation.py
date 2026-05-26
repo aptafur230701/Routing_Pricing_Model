@@ -44,6 +44,7 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
         return agent.generate_route(
             start_node, reward_matrix_penalized, time_matrix,
             distance_arr, max_duration,
+            beam_width=3,
         )
 
     agent.epsilon = 0
