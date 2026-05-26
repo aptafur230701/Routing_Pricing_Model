@@ -41,11 +41,20 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
     El techo de pasos es num_nodes (defensivo; terminación natural vía depot).
     """
     if hasattr(agent, 'generate_route') and distance_arr is not None:
-        return agent.generate_route(
+        route, reward, duration = agent.generate_route(
             start_node, reward_matrix_penalized, time_matrix,
             distance_arr, max_duration,
-            beam_width=3,
+            beam_width=1,
         )
+        if route is None or duration < max_duration * 0.85:
+            route_b, reward_b, duration_b = agent.generate_route(
+                start_node, reward_matrix_penalized, time_matrix,
+                distance_arr, max_duration,
+                beam_width=3,
+            )
+            if route_b is not None and reward_b > reward:
+                return route_b, reward_b, duration_b
+        return route, reward, duration
 
     agent.epsilon = 0
     agent.policy_net.eval()
