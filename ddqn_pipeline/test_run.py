@@ -9,9 +9,15 @@ Usage
   python test_run.py
 """
 
+import os
+import sys
 import random
 import numpy as np
 import torch
+
+# Ensure ddqn_pipeline/ is importable regardless of working directory
+_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _dir)
 
 from config import (
     SEED, DEVICE, MAX_DURATION,
