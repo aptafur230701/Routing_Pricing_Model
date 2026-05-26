@@ -23,7 +23,7 @@ import pandas as pd
 from config import (
     MPG,
     STOCHASTIC_MODE, NOISE_FRACTION,
-    BIG_M_PENALTY,
+    BIG_M_PENALTY, MARGINAL_COST_SIN_DIESEL,
 )
 
 
@@ -60,7 +60,8 @@ def build_day_matrices(
     """
     revenue = (rate_day * distance_arr).copy()
     revenue[loads_day <= 1] = 0
-    cost       = distance_arr * (diesel_arr / MPG) + 163 + 1.2 * distance_arr
+    #cost       = distance_arr * (diesel_arr / MPG) + 158 + 1.2 * distance_arr
+    cost       = distance_arr * (diesel_arr / MPG) + distance_arr * MARGINAL_COST_SIN_DIESEL
     reward_arr = np.round(revenue - cost, 0)
 
     reward_matrix = pd.DataFrame(reward_arr)

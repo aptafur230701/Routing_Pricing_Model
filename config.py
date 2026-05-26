@@ -9,6 +9,7 @@ import torch
 
 # ── Problem identity ──────────────────────────────────────────
 MPG             = 6.5
+MARGINAL_COST_SIN_DIESEL = 1.73
 
 # ── Stochastic reward ────────────────────────────────────────
 STOCHASTIC_MODE  = True

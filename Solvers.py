@@ -251,18 +251,20 @@ def solve_heuristic(start_node, time_m, reward_m, max_d, num_n):
     max_arcs = num_n - 1
 
     while steps < max_arcs:
-        best_reward = 0  # CAMBIO: umbral mínimo 0, no -inf
+        best_reward = -np.inf  
         best_next_node = None
 
         for next_node in range(num_n):
             if next_node != current_node and next_node not in visited:
                 step_time = time_m[current_node][next_node]
                 return_time = time_m[next_node][start_node]
-                step_reward = reward_m[current_node][next_node]
                 total_future_time = time_elapsed + step_time + return_time
-                if total_future_time <= max_d:
-                    if step_reward > best_reward:
-                        best_reward = step_reward
+                if total_future_time <= max_d:          # ← filtro de tiempo primero
+                    step_reward = reward_m[current_node][next_node]
+                    return_reward = reward_m[next_node][start_node]
+                    total_cycle_reward = step_reward + return_reward
+                    if total_cycle_reward > best_reward:
+                        best_reward = total_cycle_reward
                         best_next_node = next_node
 
         if best_next_node is not None:
@@ -447,8 +449,27 @@ def solve_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n):
         start_node, time_m, reward_m, max_d, num_n
     )
 
-    if not is_valid:
-        return "Infeasible", None, -np.inf, np.inf
+    # Bug 3 fix: heuristic may reject all arcs (e.g. all rewards negative) and
+    # return an invalid seed. Fall back to the nearest feasible out-and-back.
+    if not is_valid or init_route == [start_node]:
+        fallback_route = None
+        fallback_reward = -np.inf
+        fallback_time = np.inf
+        for neighbor in range(num_n):
+            if neighbor == start_node:
+                continue
+            t = time_m[start_node][neighbor] + time_m[neighbor][start_node]
+            if t <= max_d:
+                r = reward_m[start_node][neighbor] + reward_m[neighbor][start_node]
+                if fallback_route is None or r > fallback_reward:
+                    fallback_route = [start_node, neighbor, start_node]
+                    fallback_reward = r
+                    fallback_time = t
+        if fallback_route is None:
+            return "Infeasible", None, -np.inf, np.inf
+        init_route = fallback_route
+        init_reward = fallback_reward
+        init_time = fallback_time
 
     best_route = init_route[:]
     best_reward = init_reward
