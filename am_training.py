@@ -16,9 +16,6 @@ Interfaz análoga a run_training() de training.py:
         noise_sigma, num_nodes
     )
 
-Compatibilidad
---------------
-· routing_env.py, agent.py, training.py → sin cambios.
 · Usa RoutingEnv como entorno estándar (misma API Gymnasium).
 """
 
@@ -29,7 +26,6 @@ import torch.nn as nn
 
 from config import (
     MAX_DURATION,
-    INCOMPLETE_PENALTY,
     DEVICE,
     SEED,
     get_episodes_per_node,

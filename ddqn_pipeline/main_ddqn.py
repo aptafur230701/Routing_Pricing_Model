@@ -1,19 +1,15 @@
 """
-main.py
-=======
-Entry point for the AM-PPO pipeline.
-
-  1. Load data          (problem_data.py)
-  2. Training           (am_training.py)
-  3. Evaluation         (evaluation.py)
-  4. Save results       (evaluation.py)
+main_ddqn.py
+============
+Self-contained entry point for the DDQN pipeline.
 
 Usage
 -----
-  python main.py
+  python ddqn_pipeline/main_ddqn.py
 """
 
 import os
+import sys
 import random
 import time
 import warnings
@@ -22,17 +18,22 @@ import torch
 
 warnings.filterwarnings("ignore")
 
-import sys
+# ── Path setup: ensure ddqn_pipeline/ is importable regardless of cwd ─────────
+_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _dir)
+
 print(sys.executable)
 
 from config import (
     SEED, DEVICE, STOCHASTIC_MODE, NOISE_FRACTION,
+    REWARD_SCALE_FACTOR,
     get_episodes_per_node,
 )
+from state import get_state_size
 from problem_data import load_matrices
-from evaluation import (
-    run_solver_comparison, save_results, plot_diagnostics, plot_ppo_diagnostics,
-)
+from evaluation import run_solver_comparison, save_results, plot_diagnostics
+from tuning import run_optuna
+from training import run_training
 
 
 def set_seeds(seed: int):
@@ -43,33 +44,37 @@ def set_seeds(seed: int):
         torch.cuda.manual_seed(seed)
 
 
-def _run_am(
+def _run_ddqn(
     NUM_NODES, time_matrix, rate_stack, loads_stack,
     distance_arr, diesel_arr, noise_sigma, cwd,
 ):
-    """Pipeline AM: entrenamiento PPO → checkpoint."""
-    from am_training import run_am_training
-
-    episodes_per_node = get_episodes_per_node(NUM_NODES)
-    num_episodes      = episodes_per_node * NUM_NODES
+    """Pipeline completo DDQN: Optuna → entrenamiento → checkpoint."""
+    state_size          = get_state_size(NUM_NODES)
+    episodes_per_node   = get_episodes_per_node(NUM_NODES)
+    num_episodes        = episodes_per_node * NUM_NODES
+    epsilon_decay_steps = num_episodes * NUM_NODES
 
     print(f"Device           : {DEVICE}")
+    print(f"State size       : {state_size}  (2 + {NUM_NODES} visited + 2 step)")
     print(f"Training episodes: {num_episodes}")
+
+    print("\n--- Optuna (30 trials) ---")
+    best_params = run_optuna(
+        time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
+        noise_sigma, NUM_NODES, epsilon_decay_steps, n_trials=30,
+    )
 
     set_seeds(SEED)
     t0 = time.time()
-    agent_am, critic, ep_rewards, ep_losses, training_log = run_am_training(
-        time_matrix, rate_stack, loads_stack,
+    agent, ep_rewards, ep_losses = run_training(
+        best_params, time_matrix, rate_stack, loads_stack,
         distance_arr, diesel_arr, noise_sigma, NUM_NODES,
     )
     train_time = time.time() - t0
     print(f"Training time: {train_time:.1f} s")
 
-    torch.save(
-        {"agent": agent_am.state_dict(), "critic": critic.state_dict()},
-        os.path.join(cwd, f"am_checkpoint_{NUM_NODES}nodes.pt"),
-    )
-    return agent_am, ep_rewards, ep_losses, train_time, training_log
+    agent.save(os.path.join(cwd, f"ddqn_checkpoint_{NUM_NODES}nodes.pt"))
+    return agent, ep_rewards, ep_losses, train_time
 
 
 def _evaluate_and_report(
@@ -145,7 +150,7 @@ def main():
 
     for NUM_NODES in [10]:
         print(f"\n{'='*60}")
-        print(f"  AM — {NUM_NODES} nodes")
+        print(f"  DDQN — {NUM_NODES} nodes")
         print(f"{'='*60}")
 
         set_seeds(SEED)
@@ -153,18 +158,15 @@ def main():
         time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, noise_sigma = \
             load_matrices(NUM_NODES)
 
-        agent_am, ep_r, ep_l, t, training_log = _run_am(
+        agent_ddqn, ep_r, ep_l, t = _run_ddqn(
             NUM_NODES, time_matrix, rate_stack, loads_stack,
             distance_arr, diesel_arr, noise_sigma, cwd,
         )
         _evaluate_and_report(
-            agent_am, NUM_NODES, time_matrix, rate_stack, loads_stack,
+            agent_ddqn, NUM_NODES, time_matrix, rate_stack, loads_stack,
             distance_arr, diesel_arr, noise_sigma, ep_r, ep_l, t,
-            summary_rows, cwd, label="AM",
+            summary_rows, cwd, label="DDQN",
         )
-        suffix = f"_stochastic_sigma{NOISE_FRACTION:.0%}" if STOCHASTIC_MODE else "_deterministic"
-        ppo_plot_path = os.path.join(cwd, f"PPO_Diagnostics{suffix}_AM.png")
-        plot_ppo_diagnostics(training_log, NUM_NODES, ppo_plot_path)
 
     print("\nDone!")
 

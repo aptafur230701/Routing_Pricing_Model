@@ -31,7 +31,7 @@ from config import (
     RETURN_SUCCESS_BONUS,
     TIME_VIOLATION_PENALTY,
 )
-from state_features import get_state_size, build_state
+from state import get_state_size, build_state
 from problem_data import sample_stochastic_reward
 
 

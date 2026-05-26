@@ -1,25 +1,26 @@
 """
 evaluation.py
 =============
-Post-training evaluation:
-  · generate_optimal_route  — deterministic greedy rollout with trained agent
+Post-training evaluation for the DDQN pipeline:
+  · generate_optimal_route  — deterministic greedy rollout with trained DQN agent
   · evaluate_stochastic     — N-episode stochastic reward distribution
   · run_solver_comparison   — DRL vs MIP vs Greedy vs 2-Opt vs GA vs LNS
   · save_results            — Excel output
   · plot_diagnostics        — 2×2 training diagnostics figure
 """
 
-import os
 import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import torch
 
 from config import (
     STOCHASTIC_MODE, MAX_DURATION,
     REWARD_SCALE_FACTOR,
     N_EVAL_EPISODES, NOISE_FRACTION, SEED,
 )
+from state import build_state
 from problem_data import sample_stochastic_reward, build_day_matrices
 from Solvers import (
     solve_mip, solve_heuristic, solve_2opt_heuristic,
@@ -32,25 +33,111 @@ from Solvers import (
 def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penalized,
                             num_nodes, max_duration=MAX_DURATION,
                             distance_arr=None):
-    """Greedy rollout with the trained AMRoutingAgent (no grad).
+    """Greedy rollout with the trained DQN agent (epsilon=0, no grad)."""
+    agent.epsilon = 0
+    agent.policy_net.eval()
 
-    Delegates to agent.generate_route() with beam_width=1 and retries
-    beam_width=3 if the greedy route is None or suspiciously short.
-    """
-    route, reward, duration = agent.generate_route(
-        start_node, reward_matrix_penalized, time_matrix,
-        distance_arr, max_duration,
-        beam_width=1,
-    )
-    if route is None or duration < max_duration * 0.85:
-        route_b, reward_b, duration_b = agent.generate_route(
-            start_node, reward_matrix_penalized, time_matrix,
-            distance_arr, max_duration,
-            beam_width=3,
-        )
-        if route_b is not None and reward_b > reward:
-            return route_b, reward_b, duration_b
-    return route, reward, duration
+    current_node  = start_node
+    time_elapsed  = 0.0
+    visited_set   = {start_node}
+    visited_inter = set()
+    state         = build_state(current_node, time_elapsed, visited_set,
+                                0, max_duration, num_nodes)
+    route         = [start_node]
+    total_reward  = 0.0
+    returned_home = False
+
+    with torch.no_grad():
+        for step in range(num_nodes):  # defensive ceiling
+            st = torch.from_numpy(state).float().unsqueeze(0).to(agent.device)
+            q  = agent.policy_net(st).cpu().numpy()[0]
+
+            q[current_node] = -np.inf
+            for v in visited_inter:
+                if 0 <= v < len(q):
+                    q[v] = -np.inf
+
+            # Time-feasibility lookahead
+            for j in range(num_nodes):
+                if j != start_node and q[j] != -np.inf:
+                    t_to_j = (time_matrix.iloc[current_node, j]
+                              if hasattr(time_matrix, 'iloc')
+                              else float(time_matrix[current_node][j]))
+                    t_j_to_start = (time_matrix.iloc[j, start_node]
+                                    if hasattr(time_matrix, 'iloc')
+                                    else float(time_matrix[j][start_node]))
+                    if time_elapsed + t_to_j + t_j_to_start > max_duration + 1e-6:
+                        q[j] = -np.inf
+
+            next_node = int(np.argmax(q))
+
+            # Stuck — try forced return
+            if q[next_node] == -np.inf:
+                if current_node != start_node:
+                    rt = (time_matrix.iloc[current_node, start_node]
+                          if hasattr(time_matrix, 'iloc')
+                          else time_matrix[current_node][start_node])
+                    if time_elapsed + rt <= max_duration + 1e-6:
+                        next_node = start_node
+                    else:
+                        break
+                else:
+                    break
+
+            step_time   = (time_matrix.iloc[current_node, next_node]
+                           if hasattr(time_matrix, 'iloc')
+                           else time_matrix[current_node][next_node])
+            step_reward = (reward_matrix_penalized.iloc[current_node, next_node]
+                           if hasattr(reward_matrix_penalized, 'iloc')
+                           else reward_matrix_penalized[current_node][next_node])
+
+            if time_elapsed + step_time > max_duration + 1e-6 and next_node != start_node:
+                break
+
+            time_elapsed  += step_time
+            total_reward  += step_reward
+            current_node   = next_node
+            route.append(current_node)
+
+            if current_node != start_node:
+                visited_inter.add(current_node)
+            visited_set.add(current_node)
+            state = build_state(current_node, time_elapsed, visited_set,
+                                step + 1, max_duration, num_nodes)
+
+            if current_node == start_node:
+                returned_home = True
+                break
+
+        # Force return if max steps reached
+        if not returned_home and current_node != start_node:
+            rt = (time_matrix.iloc[current_node, start_node]
+                  if hasattr(time_matrix, 'iloc')
+                  else time_matrix[current_node][start_node])
+            rr = (reward_matrix_penalized.iloc[current_node, start_node]
+                  if hasattr(reward_matrix_penalized, 'iloc')
+                  else reward_matrix_penalized[current_node][start_node])
+            if time_elapsed + rt <= max_duration + 1e-6:
+                time_elapsed  += rt
+                total_reward  += rr
+                current_node   = start_node
+                route.append(start_node)
+                returned_home  = True
+
+    agent.policy_net.train()
+
+    is_cycle = (returned_home
+                and len(route) > 1
+                and route[0] == start_node
+                and route[-1] == start_node)
+    if not is_cycle:
+        return None, -np.inf, np.inf
+
+    inter = route[1:-1]
+    if len(inter) != len(set(inter)):
+        print(f"Warning: duplicate intermediate nodes in {route}")
+
+    return route, total_reward, time_elapsed
 
 
 # ── Stochastic evaluation ─────────────────────────────────────
@@ -63,11 +150,10 @@ def evaluate_stochastic(agent, start_node, time_matrix, reward_matrix_penalized,
 
     for _ in range(n_episodes):
         route, reward, duration = generate_optimal_route(
-            agent, start_node, time_matrix, reward_matrix_penalized, num_nodes,
-            distance_arr=distance_arr)
+            agent, start_node, time_matrix, reward_matrix_penalized, num_nodes)
         if route is not None:
             if STOCHASTIC_MODE and noise_sigma > 0:
-                reward = reward + np.random.normal(0, noise_sigma)
+                reward = sample_stochastic_reward(reward, noise_sigma, REWARD_SCALE_FACTOR)
             rewards.append(reward)
             durations.append(duration)
             if duration <= MAX_DURATION:
@@ -94,12 +180,7 @@ def evaluate_stochastic(agent, start_node, time_matrix, reward_matrix_penalized,
 def run_solver_comparison(agent, time_matrix,
                            rate_stack, loads_stack, distance_arr, diesel_arr,
                            noise_sigma, num_nodes):
-    """Run DRL + all benchmark solvers for every start node.
-
-    Para cada nodo de inicio se samplea un día aleatorio del stack histórico
-    de modo que DRL y todos los solvers benchmark compiten sobre la misma
-    realización de mercado (comparación equitativa).
-    """
+    """Run DRL + all benchmark solvers for every start node."""
     results           = []
     mip_times         = []
     heuristic_times   = []
@@ -113,7 +194,6 @@ def run_solver_comparison(agent, time_matrix,
 
     print("\n--- Solver Comparison ---")
     for s in range(num_nodes):
-        # Samplear un día para este nodo de inicio
         day_idx = np.random.randint(0, num_days)
         reward_matrix, reward_matrix_penalized = build_day_matrices(
             rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
@@ -121,24 +201,19 @@ def run_solver_comparison(agent, time_matrix,
         print(f"\nStart node {s} | day {day_idx}")
         row = {'Start Node': s, 'Day Index': day_idx}
 
-        # DRL — Det evaluation (sin ruido, mismas condiciones que los baselines)
-        # Se usa noise_sigma=0 implícitamente: generate_optimal_route es determinista.
-        # Esto permite un gap de calidad justo. La evaluación estocástica se reporta aparte.
+        # DRL
         t0 = time.time()
         drl_route, drl_reward, drl_duration = generate_optimal_route(
-            agent, s, time_matrix, reward_matrix_penalized, num_nodes,
-            distance_arr=distance_arr)
+            agent, s, time_matrix, reward_matrix_penalized, num_nodes)
         drl_times.append(time.time() - t0)
         row.update({
-            'DRL Route':          drl_route,
-            'DRL Det Reward':  drl_reward   if drl_route else -np.inf,
-            'DRL Duration':       drl_duration if drl_route else np.inf,
-            'DRL Valid':          drl_route is not None and drl_route[0] == drl_route[-1],
+            'DRL Route':      drl_route,
+            'DRL Det Reward': drl_reward   if drl_route else -np.inf,
+            'DRL Duration':   drl_duration if drl_route else np.inf,
+            'DRL Valid':      drl_route is not None and drl_route[0] == drl_route[-1],
         })
-        # DRL — Stochastic evaluation (con ruido, mide robustez bajo incertidumbre)
         stoch = evaluate_stochastic(agent, s, time_matrix, reward_matrix_penalized,
-                                     num_nodes, noise_sigma,
-                                     distance_arr=distance_arr)
+                                     num_nodes, noise_sigma)
         row.update({
             'DRL Stoch Mean':   stoch['mean_reward'],
             'DRL Stoch Std':    stoch['std_reward'],
@@ -228,20 +303,20 @@ def run_solver_comparison(agent, time_matrix,
         })
         print(f"  HGA-LNS:{hga_route} | reward {hga_reward:.1f}")
 
-        # Optimality gaps vs MIP — usa DRL Det Reward para comparación justa
+        # Optimality gaps vs MIP
         mip_r = row['MIP Reward']
         def gap(solver_r, solver_valid):
             if row['MIP Valid'] and solver_valid and abs(mip_r) > 1e-6:
                 return ((mip_r - solver_r) / abs(mip_r)) * 100
             return float('nan')
 
-        row['DRL Gap (%)']       = gap(row['DRL Det Reward'],    row['DRL Valid'])
+        row['DRL Gap (%)']       = gap(row['DRL Det Reward'],   row['DRL Valid'])
+        row['DRL Stoch Gap (%)'] = gap(row['DRL Stoch Mean'],   row['DRL Stoch Valid%'] > 0)
         row['Heuristic Gap (%)'] = gap(row['Heuristic Reward'], row['Heuristic Valid'])
         row['2Opt Gap (%)']      = gap(row['2Opt Reward'],      row['2Opt Valid'])
         row['GA Gap (%)']        = gap(row['GA Reward'],        row['GA Valid'])
         row['LNS Gap (%)']       = gap(row['LNS Reward'],       row['LNS Valid'])
         row['HGA-LNS Gap (%)']   = gap(row['HGA-LNS Reward'],  row['HGA-LNS Valid'])
-        row['DRL Stoch Gap (%)'] = gap(row['DRL Stoch Mean'],  row['DRL Stoch Valid%'] > 0)
         results.append(row)
 
     df = pd.DataFrame(results)
@@ -262,59 +337,6 @@ def save_results(results_df, summary_rows, output_path):
         results_df.to_excel(writer, sheet_name='Per Node Results', index=False)
         summary_df.to_excel(writer, sheet_name='Summary', index=False)
     print(f"Results saved → {output_path}")
-
-
-def plot_ppo_diagnostics(training_log: list, num_nodes: int, output_path: str):
-    """Gráfica 2×3 con métricas internas de PPO por update.
-
-    Métricas graficadas
-    -------------------
-    Fila 1 : Reward promedio | Explained Variance | Entropía
-    Fila 2 : Policy Loss + Value Loss | KL Divergence | Clip Fraction
-    """
-    try:
-        import pandas as pd
-        df = pd.DataFrame(training_log)
-
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-        fig.suptitle(
-            f'PPO Internal Diagnostics — {num_nodes} nodes '
-            f'(sigma={NOISE_FRACTION*100:.0f}%)', fontsize=14
-        )
-
-        updates = df["update"].values
-
-        def _plot(ax, y, title, ylabel, color, hline=None, hline_label=None):
-            ax.plot(updates, y, linewidth=0.9, color=color)
-            ax.set_title(title); ax.set_xlabel("PPO Update"); ax.set_ylabel(ylabel)
-            ax.grid(True, alpha=0.3)
-            if hline is not None:
-                ax.axhline(hline, color="red", linestyle="--", linewidth=0.8,
-                           label=hline_label or f"{hline}")
-                ax.legend(fontsize=8)
-
-        _plot(axes[0, 0], df["reward"],       "Avg Reward per Update",   "Reward",       "steelblue")
-        _plot(axes[0, 1], df["explained_var"], "Critic Explained Variance", "Expl. Var.", "mediumseagreen",
-              hline=0.5, hline_label="threshold 0.5")
-        _plot(axes[0, 2], df["entropy"],       "Policy Entropy",          "Entropy",      "mediumpurple")
-
-        ax_loss = axes[1, 0]
-        ax_loss.plot(updates, df["policy_loss"], linewidth=0.9, color="coral",    label="Policy loss")
-        ax_loss.plot(updates, df["value_loss"],  linewidth=0.9, color="goldenrod", label="Value loss")
-        ax_loss.set_title("Policy & Value Loss"); ax_loss.set_xlabel("PPO Update")
-        ax_loss.set_ylabel("Loss"); ax_loss.grid(True, alpha=0.3); ax_loss.legend(fontsize=8)
-
-        _plot(axes[1, 1], df["kl_divergence"], "Approx KL Divergence",   "KL",           "tomato",
-              hline=0.02, hline_label="target 0.02")
-        _plot(axes[1, 2], df["clip_fraction"], "PPO Clip Fraction",       "Clip Frac.",   "darkorange",
-              hline=0.1, hline_label="ref 0.10")
-
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=150)
-        plt.close()
-        print(f"PPO diagnostics plot saved → {output_path}")
-    except Exception as e:
-        print(f"Warning: could not generate PPO diagnostics plot: {e}")
 
 
 def plot_diagnostics(episode_rewards, episode_losses, results_df,
