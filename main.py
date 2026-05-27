@@ -8,9 +8,24 @@ Entry point for the AM-PPO pipeline.
   3. Evaluation         (evaluation.py)
   4. Save results       (evaluation.py)
 
-Usage
------
-  python main.py
+Uso
+---
+  Cambia NUM_NODES abajo según la rama en la que estés:
+    train-10nodes  →  NUM_NODES = 10
+    train-20nodes  →  NUM_NODES = 20
+    train-35nodes  →  NUM_NODES = 35
+    train-50nodes  →  NUM_NODES = 50
+    train-75nodes  →  NUM_NODES = 75
+    train-97nodes  →  NUM_NODES = 97
+
+  Luego ejecuta simplemente:
+    python main.py
+
+Checkpoints (transfer learning)
+--------------------------------
+  Los .pt se guardan en  checkpoints/  (raíz del proyecto, ignorada por git).
+  Para usar transfer learning, copia el .pt del tamaño anterior en esa carpeta
+  antes de entrenar (o entrena en orden y se guarda sólo).
 """
 
 import os
@@ -33,6 +48,7 @@ from problem_data import load_matrices
 from evaluation import (
     run_solver_comparison, save_results, plot_diagnostics, plot_ppo_diagnostics,
 )
+from transfer_learning import build_agent_for_training
 
 
 def set_seeds(seed: int):
@@ -46,6 +62,7 @@ def set_seeds(seed: int):
 def _run_am(
     NUM_NODES, time_matrix, rate_stack, loads_stack,
     distance_arr, diesel_arr, noise_sigma, cwd,
+    pretrained_agent=None, pretrained_critic=None,
 ):
     """Pipeline AM: entrenamiento PPO → checkpoint."""
     from am_training import run_am_training
@@ -61,6 +78,8 @@ def _run_am(
     agent_am, critic, ep_rewards, ep_losses, training_log = run_am_training(
         time_matrix, rate_stack, loads_stack,
         distance_arr, diesel_arr, noise_sigma, NUM_NODES,
+        pretrained_agent=pretrained_agent,
+        pretrained_critic=pretrained_critic,
     )
     train_time = time.time() - t0
     print(f"Training time: {train_time:.1f} s")
@@ -140,33 +159,45 @@ def _evaluate_and_report(
 
 
 def main():
+    # ── Cambia este valor según la rama en la que estés ────────────────────────
+    NUM_NODES = 10   # opciones: 10 · 20 · 35 · 50 · 75 · 97
+    # ──────────────────────────────────────────────────────────────────────────
+
     cwd          = os.path.dirname(os.path.abspath(__file__))
     summary_rows = []
 
-    for NUM_NODES in [10]:
-        print(f"\n{'='*60}")
-        print(f"  AM — {NUM_NODES} nodes")
-        print(f"{'='*60}")
+    print(f"\n{'='*60}")
+    print(f"  AM — {NUM_NODES} nodes")
+    print(f"{'='*60}")
 
-        set_seeds(SEED)
+    set_seeds(SEED)
 
-        time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, noise_sigma = \
-            load_matrices(NUM_NODES)
+    output_dir = os.path.join(cwd, f"results_{NUM_NODES}nodes")
+    os.makedirs(output_dir, exist_ok=True)
 
-        agent_am, ep_r, ep_l, t, training_log = _run_am(
-            NUM_NODES, time_matrix, rate_stack, loads_stack,
-            distance_arr, diesel_arr, noise_sigma, cwd,
-        )
-        _evaluate_and_report(
-            agent_am, NUM_NODES, time_matrix, rate_stack, loads_stack,
-            distance_arr, diesel_arr, noise_sigma, ep_r, ep_l, t,
-            summary_rows, cwd, label="AM",
-        )
-        suffix = f"_stochastic_sigma{NOISE_FRACTION:.0%}" if STOCHASTIC_MODE else "_deterministic"
-        ppo_plot_path = os.path.join(cwd, f"PPO_Diagnostics{suffix}_AM.png")
-        plot_ppo_diagnostics(training_log, NUM_NODES, ppo_plot_path)
+    # Carpeta compartida de checkpoints (para transfer learning entre ramas)
+    checkpoint_dir = os.path.join(cwd, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
-    print("\nDone!")
+    time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, noise_sigma = \
+        load_matrices(NUM_NODES)
+
+    agent_pretrained, critic_pretrained = build_agent_for_training(checkpoint_dir, NUM_NODES)
+    agent_am, ep_r, ep_l, t, training_log = _run_am(
+        NUM_NODES, time_matrix, rate_stack, loads_stack,
+        distance_arr, diesel_arr, noise_sigma, checkpoint_dir,
+        agent_pretrained, critic_pretrained,
+    )
+    _evaluate_and_report(
+        agent_am, NUM_NODES, time_matrix, rate_stack, loads_stack,
+        distance_arr, diesel_arr, noise_sigma, ep_r, ep_l, t,
+        summary_rows, output_dir, label="AM",
+    )
+    suffix = f"_stochastic_sigma{NOISE_FRACTION:.0%}" if STOCHASTIC_MODE else "_deterministic"
+    ppo_plot_path = os.path.join(output_dir, f"PPO_Diagnostics{suffix}_AM.png")
+    plot_ppo_diagnostics(training_log, NUM_NODES, ppo_plot_path)
+
+    print(f"\nDone! Checkpoint guardado en: checkpoints/am_checkpoint_{NUM_NODES}nodes.pt")
 
 
 if __name__ == "__main__":

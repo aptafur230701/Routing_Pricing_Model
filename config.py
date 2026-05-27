@@ -2,7 +2,8 @@
 config.py
 =========
 All global constants, toggles, and hyperparameter defaults for the AM-PPO pipeline.
-Nothing is imported from other project modules here.
+This file is imported by all modules, so it should not contain any heavy dependencies.
+
 """
 
 import torch
@@ -31,6 +32,23 @@ BIG_M_PENALTY          = -1e9
 # ── Evaluation ────────────────────────────────────────────────
 N_EVAL_EPISODES = 50
 
+# ── AM Model architecture ─────────────────────────────────────
+AM_D_H      = 128  # Dimensión de embeddings del Transformer
+AM_N_HEADS  = 8    # Número de cabezas de atención en el Transformer
+AM_N_LAYERS = 3    # Número de capas del encoder Transformer
+AM_D_FF     = 512  # Dimensión de la capa feed-forward
+
+# ── PPO hyperparameters ───────────────────────────────────────
+PPO_N_EPISODES_PER_UPDATE = 360    # Episodios recolectados antes de cada update PPO
+PPO_N_EPOCHS              = 4      # Épocas de entrenamiento PPO por rollout
+PPO_BATCH_SIZE            = 64     # Tamaño de batch para entrenamiento PPO
+PPO_LR                    = 1e-4   # Learning rate para el actor
+PPO_GAMMA                 = 0.99   # Factor de descuento para las recompensas futuras
+PPO_GAE_LAMBDA            = 0.95   # Factor de GAE
+PPO_CLIP_EPS              = 0.15   # Clip PPO para limitar cambios de política
+PPO_ENTROPY_COEF          = 0.05   # Coeficiente de entropía para PPO
+PPO_GRAD_CLIP             = 0.5    # Clipping de gradiente para PPO
+
 # ── Reproducibility ───────────────────────────────────────────
 SEED = 42
 
@@ -41,6 +59,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def get_episodes_per_node(num_nodes: int) -> int:
     """Episodes per start-node for the full training run."""
     if num_nodes <= 10:  return 5000
-    if num_nodes <= 15:  return 5500
     if num_nodes <= 20:  return 6000
-    return 7000
+    if num_nodes <= 35:  return 6500
+    if num_nodes <= 50:  return 7000
+    if num_nodes <= 75:  return 7500
+    return 8000          # 97 nodos
+

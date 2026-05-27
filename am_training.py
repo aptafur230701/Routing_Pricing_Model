@@ -29,6 +29,10 @@ from config import (
     DEVICE,
     SEED,
     get_episodes_per_node,
+    AM_D_H, AM_N_HEADS, AM_N_LAYERS, AM_D_FF,
+    PPO_N_EPISODES_PER_UPDATE, PPO_N_EPOCHS, PPO_BATCH_SIZE,
+    PPO_LR, PPO_GAMMA, PPO_GAE_LAMBDA, PPO_CLIP_EPS,
+    PPO_ENTROPY_COEF, PPO_GRAD_CLIP,
 )
 from routing_env import RoutingEnv
 from problem_data import build_day_matrices
@@ -250,20 +254,8 @@ def run_am_training(
     diesel_arr:   np.ndarray,
     noise_sigma:  float,
     num_nodes:    int,
-    # Hiperparámetros AM (valores por defecto razonables para 10 nodos)
-    d_h:                    int   = 128, 
-    n_heads:                int   = 8,
-    n_layers:               int   = 3, 
-    d_ff:                   int   = 512,
-    n_episodes_per_update:  int   = 360,
-    n_ppo_epochs:           int   = 4,    
-    ppo_batch_size:         int   = 64,
-    lr:                     float = 1e-4, 
-    gamma:                  float = 0.99,
-    gae_lambda:             float = 0.95,
-    clip_eps:               float = 0.15,
-    entropy_coef:           float = 0.05,
-    grad_clip:              float = 0.5,  
+    pretrained_agent:  AMRoutingAgent = None,
+    pretrained_critic: CriticHead     = None,
 ) -> tuple:
     """
     Entrena AMRoutingAgent + CriticHead con PPO.
@@ -285,6 +277,20 @@ def run_am_training(
     episode_rewards: list[float]
     episode_losses : list[float]
     """
+    d_h                   = AM_D_H
+    n_heads               = AM_N_HEADS
+    n_layers              = AM_N_LAYERS
+    d_ff                  = AM_D_FF
+    n_episodes_per_update = PPO_N_EPISODES_PER_UPDATE
+    n_ppo_epochs          = PPO_N_EPOCHS
+    ppo_batch_size        = PPO_BATCH_SIZE
+    lr                    = PPO_LR
+    gamma                 = PPO_GAMMA
+    gae_lambda            = PPO_GAE_LAMBDA
+    clip_eps              = PPO_CLIP_EPS
+    entropy_coef          = PPO_ENTROPY_COEF
+    grad_clip             = PPO_GRAD_CLIP
+
     torch.manual_seed(SEED)
     np.random.seed(SEED)
 
@@ -294,8 +300,10 @@ def run_am_training(
     num_days          = rate_stack.shape[0]
 
     # ── Modelos ───────────────────────────────────────────────────────────────
-    agent  = AMRoutingAgent(num_nodes, d_h, n_heads, n_layers, d_ff, device=DEVICE)
-    critic = CriticHead(d_h).to(DEVICE)
+    agent  = pretrained_agent  if pretrained_agent  is not None \
+             else AMRoutingAgent(num_nodes, d_h, n_heads, n_layers, d_ff, device=DEVICE)
+    critic = pretrained_critic if pretrained_critic is not None \
+             else CriticHead(d_h).to(DEVICE)
 
     # Optimizers separados: el critic necesita converger más rápido que el actor
     # para dar señales de ventaja de calidad. Con un optimizer compartido y lr=3e-5
