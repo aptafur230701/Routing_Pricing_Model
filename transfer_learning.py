@@ -86,9 +86,8 @@ def get_source_checkpoint(base_dir: str, target_num_nodes: int) -> str | None:
         os.path.join(base_dir, fname),
     ]
     # eliminar duplicados manteniendo orden
-    seen, candidates = set(), [
-        p for p in candidates if not (p in seen or seen.add(p))
-    ]
+    seen = set()
+    candidates = [p for p in candidates if not (p in seen or seen.add(p))]
 
     for path in candidates:
         if os.path.exists(path):

@@ -39,14 +39,14 @@ AM_N_LAYERS = 3    # Número de capas del encoder Transformer
 AM_D_FF     = 512  # Dimensión de la capa feed-forward
 
 # ── PPO hyperparameters ───────────────────────────────────────
-PPO_N_EPISODES_PER_UPDATE = 360    # Episodios recolectados antes de cada update PPO
+PPO_N_EPISODES_PER_UPDATE = 512    # Episodios recolectados antes de cada update PPO
 PPO_N_EPOCHS              = 4      # Épocas de entrenamiento PPO por rollout
 PPO_BATCH_SIZE            = 64     # Tamaño de batch para entrenamiento PPO
-PPO_LR                    = 1e-4   # Learning rate para el actor
+PPO_LR                    = 3e-5   # Learning rate para el actor
 PPO_GAMMA                 = 0.99   # Factor de descuento para las recompensas futuras
 PPO_GAE_LAMBDA            = 0.95   # Factor de GAE
 PPO_CLIP_EPS              = 0.15   # Clip PPO para limitar cambios de política
-PPO_ENTROPY_COEF          = 0.05   # Coeficiente de entropía para PPO
+PPO_ENTROPY_COEF          = 0.04   # Coeficiente de entropía para PPO
 PPO_GRAD_CLIP             = 0.5    # Clipping de gradiente para PPO
 
 # ── Reproducibility ───────────────────────────────────────────

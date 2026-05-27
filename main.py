@@ -160,7 +160,7 @@ def _evaluate_and_report(
 
 def main():
     # ── Cambia este valor según la rama en la que estés ────────────────────────
-    NUM_NODES = 10   # opciones: 10 · 20 · 35 · 50 · 75 · 97
+    NUM_NODES = 20   # opciones: 10 · 20 · 35 · 50 · 75 · 97
     # ──────────────────────────────────────────────────────────────────────────
 
     cwd          = os.path.dirname(os.path.abspath(__file__))
