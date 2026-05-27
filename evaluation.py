@@ -34,22 +34,15 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
                             distance_arr=None):
     """Greedy rollout with the trained AMRoutingAgent (no grad).
 
-    Delegates to agent.generate_route() with beam_width=1 and retries
-    beam_width=3 if the greedy route is None or suspiciously short.
+    Delegates to agent.generate_route() without explicit beam_width —
+    el agente resuelve el beam_width dinámicamente vía get_beam_width(num_nodes):
+    modelos pequeños (≤10 nodos) usan beam=5, tamaños intermedios (≤35) usan beam=3,
+    y modelos grandes usan beam=1 (política robusta, greedy suficiente).
     """
     route, reward, duration = agent.generate_route(
         start_node, reward_matrix_penalized, time_matrix,
         distance_arr, max_duration,
-        beam_width=1,
     )
-    if route is None or duration < max_duration * 0.85:
-        route_b, reward_b, duration_b = agent.generate_route(
-            start_node, reward_matrix_penalized, time_matrix,
-            distance_arr, max_duration,
-            beam_width=3,
-        )
-        if route_b is not None and reward_b > reward:
-            return route_b, reward_b, duration_b
     return route, reward, duration
 
 

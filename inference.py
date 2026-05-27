@@ -15,7 +15,7 @@ import os
 import torch
 import numpy as np
 
-from config import DEVICE, MAX_DURATION
+from config import DEVICE, MAX_DURATION, get_beam_width
 from am_agent import AMRoutingAgent
 from problem_data import load_matrices, build_day_matrices
 
@@ -89,6 +89,7 @@ def run_inference(agent: AMRoutingAgent, start_node: int,
         print(f"  Reward    : {total_reward:.0f}")
         print(f"  Duración  : {time_elapsed:.2f} h  (máx {MAX_DURATION:.1f} h)")
         print(f"  Nodos vis.: {len(route) - 1} de {NUM_NODES}")
+    print(f"  Beam width: {get_beam_width(NUM_NODES)}")
     print(f"  Inferencia: {inference_ms:.2f} ms")
     print("=" * 50)
 

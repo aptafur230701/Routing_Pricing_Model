@@ -65,3 +65,12 @@ def get_episodes_per_node(num_nodes: int) -> int:
     if num_nodes <= 75:  return 7500
     return 8000          # 97 nodos
 
+
+def get_beam_width(num_nodes: int) -> int:
+    """Beam width for inference, scaled by problem size.
+    Modelos pequeños necesitan más exploración en inferencia.
+    Modelos grandes tienen políticas más robustas y beam=1 es suficiente."""
+    if num_nodes <= 10: return 5   # modelo pequeño, necesita más exploración
+    if num_nodes <= 35: return 3   # balance costo/calidad
+    return 1                       # modelo grande, confiar en la política
+
