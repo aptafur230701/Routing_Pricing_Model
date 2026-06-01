@@ -49,6 +49,9 @@ PPO_CLIP_EPS              = 0.15   # Clip PPO para limitar cambios de política
 PPO_ENTROPY_COEF          = 0.05   # Coeficiente de entropía para PPO
 PPO_GRAD_CLIP             = 0.5    # Clipping de gradiente para PPO
 
+# ── Train / eval split ───────────────────────────────────────
+TRAIN_DAYS = 90   # días usados para entrenamiento; el resto (días 90-119) queda para evaluación
+
 # ── Reproducibility ───────────────────────────────────────────
 SEED = 42
 

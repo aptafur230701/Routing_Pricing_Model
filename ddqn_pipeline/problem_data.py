@@ -77,13 +77,13 @@ def load_matrices(num_nodes: int) -> tuple:
     """Load data files and return multi-day stacks for rate/loads.
 
     Fixed matrices (time, distance, fuel) are loaded from single CSV files.
-    Rate and loads are loaded from .npy stacks covering the last 90 days
-    so the training loop can sample one day per episode.
+    Rate and loads are loaded from .npy stacks (datos/) so the training loop
+    can sample one day per episode.
 
     Expected file shapes
     --------------------
-    rate_multiday.npy  : [num_days, N, N]
-    load_multiday.npy  : [num_days, N, N]
+    datos/rate.npy             : [num_days, N, N]
+    datos/load_availability.npy: [num_days, N, N]
 
     Returns
     -------
@@ -94,16 +94,17 @@ def load_matrices(num_nodes: int) -> tuple:
     diesel_arr    : np.ndarray    (num_nodes × num_nodes)
     noise_sigma   : float
     """
-    cwd = os.path.dirname(os.path.abspath(__file__))
+    cwd      = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(os.path.dirname(cwd), "datos")
 
     # ── Fixed single-snapshot matrices ────────────────────────────
-    time_matrix_raw = pd.read_csv(os.path.join(cwd, "duration_matrix.csv"), index_col=0)
-    distance_raw    = pd.read_csv(os.path.join(cwd, "distance_matrix.csv"), index_col=0)
-    diesel_raw      = pd.read_csv(os.path.join(cwd, "fuel_matrix.csv"),     index_col=0)
+    time_matrix_raw = pd.read_csv(os.path.join(data_dir, "duration.csv"), index_col=0)
+    distance_raw    = pd.read_csv(os.path.join(data_dir, "distance.csv"), index_col=0)
+    diesel_raw      = pd.read_csv(os.path.join(data_dir, "fuel.csv"),     index_col=0)
 
     # ── Multi-day stacks — shape: [num_days, N, N] ───────────────
-    rate_stack_raw  = np.load(os.path.join(cwd, "rate_multiday.npy"))
-    loads_stack_raw = np.load(os.path.join(cwd, "load_multiday.npy"))
+    rate_stack_raw  = np.load(os.path.join(data_dir, "rate.npy"))
+    loads_stack_raw = np.load(os.path.join(data_dir, "load_availability.npy"))
 
     # ── Slice fixed matrices to num_nodes ─────────────────────────
     time_matrix  = (time_matrix_raw.iloc[:num_nodes, :num_nodes]).copy()
@@ -112,11 +113,10 @@ def load_matrices(num_nodes: int) -> tuple:
     distance_arr = distance_raw.iloc[:num_nodes, :num_nodes].to_numpy(dtype=float)
     diesel_arr   = diesel_raw.iloc[:num_nodes, :num_nodes].to_numpy(dtype=float)
 
-    # ── Slice stacks to num_nodes (days axis untouched) ──────────
-    rate_stack  = rate_stack_raw[:, :num_nodes, :num_nodes].astype(float)
-    loads_stack = loads_stack_raw[:, :num_nodes, :num_nodes].astype(float)
-
-    num_days = rate_stack.shape[0]
+    # ── Slice stacks to num_nodes; align days to the shorter stack ──
+    num_days    = min(rate_stack_raw.shape[0], loads_stack_raw.shape[0])
+    rate_stack  = rate_stack_raw[:num_days, :num_nodes, :num_nodes].astype(float)
+    loads_stack = loads_stack_raw[:num_days, :num_nodes, :num_nodes].astype(float)
 
     # ── Noise sigma from reward variance across all historical days ─
     all_rewards = []

@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 from config import (
     STOCHASTIC_MODE, MAX_DURATION,
     REWARD_SCALE_FACTOR,
-    N_EVAL_EPISODES, NOISE_FRACTION, SEED,
+    N_EVAL_EPISODES, NOISE_FRACTION, SEED, TRAIN_DAYS,
 )
 from problem_data import sample_stochastic_reward, build_day_matrices
 from Solvers import (
@@ -89,9 +89,11 @@ def run_solver_comparison(agent, time_matrix,
                            noise_sigma, num_nodes):
     """Run DRL + all benchmark solvers for every start node.
 
-    Para cada nodo de inicio se samplea un día aleatorio del stack histórico
-    de modo que DRL y todos los solvers benchmark compiten sobre la misma
-    realización de mercado (comparación equitativa).
+    Para cada nodo de inicio se usa un día del set de evaluación (días
+    TRAIN_DAYS … total-1). Los índices se pre-generan con un RNG dedicado
+    antes del loop para que no dependan del estado random del agente, lo que
+    garantiza que DRL y todos los solvers compiten sobre exactamente la misma
+    realización de mercado y que los resultados son idénticos en cada corrida.
     """
     results           = []
     mip_times         = []
@@ -101,18 +103,24 @@ def run_solver_comparison(agent, time_matrix,
     ga_times          = []
     lns_times         = []
     hga_lns_times     = []
-    num_days          = rate_stack.shape[0]
-    np.random.seed(SEED)
+    num_days          = rate_stack.shape[0]   # tamaño del set de evaluación
 
-    print("\n--- Solver Comparison ---")
+    # Pre-generar índices con RNG propio — aislado del estado random del agente
+    rng         = np.random.default_rng(SEED)
+    day_indices = rng.integers(0, num_days, size=num_nodes)
+
+    print("\n--- Solver Comparison (eval set) ---")
+    print(f"Eval days: {num_days} | absolute range: [{TRAIN_DAYS}, {TRAIN_DAYS + num_days - 1}]")
+    print(f"Day assignments per node: {day_indices.tolist()}\n")
+
     for s in range(num_nodes):
-        # Samplear un día para este nodo de inicio
-        day_idx = np.random.randint(0, num_days)
+        day_idx     = int(day_indices[s])
+        abs_day_idx = TRAIN_DAYS + day_idx   # índice absoluto en el stack original
         reward_matrix, reward_matrix_penalized = build_day_matrices(
             rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
         )
-        print(f"\nStart node {s} | day {day_idx}")
-        row = {'Start Node': s, 'Day Index': day_idx}
+        print(f"\nStart node {s} | eval day {day_idx} (abs day {abs_day_idx})")
+        row = {'Start Node': s, 'Eval Day Index': day_idx, 'Abs Day Index': abs_day_idx}
 
         # DRL — Det evaluation (sin ruido, mismas condiciones que los baselines)
         # Se usa noise_sigma=0 implícitamente: generate_optimal_route es determinista.

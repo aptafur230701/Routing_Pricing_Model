@@ -42,7 +42,7 @@ print(sys.executable)
 
 from config import (
     SEED, DEVICE, STOCHASTIC_MODE, NOISE_FRACTION,
-    get_episodes_per_node,
+    get_episodes_per_node, TRAIN_DAYS,
 )
 from problem_data import load_matrices
 from evaluation import (
@@ -182,14 +182,20 @@ def main():
     time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, noise_sigma = \
         load_matrices(NUM_NODES)
 
+    # ── Train / eval split (temporal — el modelo no ve los días de eval) ──────
+    rate_train  = rate_stack[:TRAIN_DAYS]
+    loads_train = loads_stack[:TRAIN_DAYS]
+    rate_eval   = rate_stack[TRAIN_DAYS:]
+    loads_eval  = loads_stack[TRAIN_DAYS:]
+
     agent_pretrained, critic_pretrained = build_agent_for_training(checkpoint_dir, NUM_NODES)
     agent_am, ep_r, ep_l, t, training_log = _run_am(
-        NUM_NODES, time_matrix, rate_stack, loads_stack,
+        NUM_NODES, time_matrix, rate_train, loads_train,
         distance_arr, diesel_arr, noise_sigma, checkpoint_dir,
         agent_pretrained, critic_pretrained,
     )
     _evaluate_and_report(
-        agent_am, NUM_NODES, time_matrix, rate_stack, loads_stack,
+        agent_am, NUM_NODES, time_matrix, rate_eval, loads_eval,
         distance_arr, diesel_arr, noise_sigma, ep_r, ep_l, t,
         summary_rows, output_dir, label="AM",
     )
