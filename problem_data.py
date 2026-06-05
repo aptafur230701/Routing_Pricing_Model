@@ -87,7 +87,7 @@ def load_matrices(num_nodes: int) -> tuple:
     datos/load_availability.npy: [num_days, N, N]
 
     Returns
-    -------
+    -------3
     time_matrix   : pd.DataFrame  (num_nodes × num_nodes)
     rate_stack    : np.ndarray    (num_days × num_nodes × num_nodes)
     loads_stack   : np.ndarray    (num_days × num_nodes × num_nodes)
