@@ -351,6 +351,207 @@ class AMRoutingAgent(nn.Module):
         finally:
             self.train()
 
+    @torch.no_grad()
+    def beam_search_dynamic(
+        self,
+        start_node:    int,
+        start_day_idx: int,
+        rm_pen_start,           # pd.DataFrame — día de inicio, solo para features
+        time_matrix,
+        rate_stack:    np.ndarray,
+        loads_stack:   np.ndarray,
+        distance_arr:  np.ndarray,
+        diesel_arr:    np.ndarray,
+        max_duration:  float = MAX_DURATION,
+        beam_width:    int   = None,
+    ):
+        """Beam search con días de mercado dinámicos por beam.
+
+        Features del agente : rm_pen_start (día de inicio, igual que training).
+        Recompensa acumulada: matriz del día corriente según time_elapsed de cada beam,
+                              donde day_idx = start_day_idx + int(time_elapsed // 14).
+        """
+        from config import get_beam_width as _get_beam_width
+        from problem_data import build_day_matrices
+
+        if beam_width is None:
+            beam_width = _get_beam_width(self.num_nodes)
+
+        has_iloc_t = hasattr(time_matrix, "iloc")
+        max_day    = rate_stack.shape[0] - 1
+        day_cache  = {}  # day_idx → rm_penalized; evita reconstruir el mismo día
+
+        def get_rm(day_idx):
+            if day_idx not in day_cache:
+                _, rm = build_day_matrices(
+                    rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+                )
+                day_cache[day_idx] = rm
+            return day_cache[day_idx]
+
+        beams = [{
+            "current_node":  start_node,
+            "time_elapsed":  0.0,
+            "visited_set":   {start_node},
+            "visited_inter": set(),
+            "route":         [start_node],
+            "total_reward":  0.0,
+            "returned_home": False,
+        }]
+
+        for step in range(self.num_nodes):
+            next_beams = []
+
+            for beam in beams:
+                if beam["returned_home"]:
+                    next_beams.append(beam)
+                    continue
+
+                current_node = beam["current_node"]
+                time_elapsed = beam["time_elapsed"]
+                visited_set  = set(beam["visited_set"])
+
+                day_offset = int(time_elapsed // 14)
+                rm_day     = get_rm(min(start_day_idx + day_offset, max_day))
+
+                embeddings, h_t, _, _ = self._encode_step(
+                    current_node, start_node, visited_set,
+                    time_elapsed, step,
+                    rm_pen_start, time_matrix, distance_arr,
+                    max_duration,
+                )
+
+                mask_int = self._build_mask(
+                    current_node, start_node, visited_set, self.num_nodes
+                ).to(self.device)
+
+                mask_np = mask_int.cpu().numpy()[0]
+                for j in range(self.num_nodes):
+                    if mask_np[j] == 1 and j != start_node:
+                        t_to_j = (
+                            float(time_matrix.iloc[current_node, j])
+                            if has_iloc_t else float(time_matrix[current_node][j])
+                        )
+                        t_j_start = (
+                            float(time_matrix.iloc[j, start_node])
+                            if has_iloc_t else float(time_matrix[j][start_node])
+                        )
+                        if time_elapsed + t_to_j + t_j_start > max_duration + 1e-6:
+                            mask_np[j] = 0
+
+                valid_non_start = [j for j in range(self.num_nodes)
+                                   if mask_np[j] == 1 and j != start_node]
+
+                if not valid_non_start and current_node != start_node:
+                    candidate_nodes = [start_node]
+                else:
+                    bool_mask = (mask_int == 0)
+                    logits    = self.decoder._logits(h_t, embeddings, bool_mask)
+                    logits_np = logits[0].cpu().numpy()
+
+                    valid_nodes = [j for j in range(self.num_nodes) if mask_np[j] == 1]
+                    if not valid_nodes:
+                        next_beams.append(beam)
+                        continue
+
+                    valid_nodes.sort(key=lambda j: logits_np[j], reverse=True)
+                    candidate_nodes = valid_nodes[:beam_width]
+
+                for next_node in candidate_nodes:
+                    step_time = (
+                        float(time_matrix.iloc[current_node, next_node])
+                        if has_iloc_t else float(time_matrix[current_node][next_node])
+                    )
+                    if time_elapsed + step_time > max_duration + 1e-6 and next_node != start_node:
+                        continue
+
+                    step_reward = float(rm_day.iloc[current_node, next_node])
+
+                    new_visited_set   = set(visited_set)
+                    new_visited_inter = set(beam["visited_inter"])
+                    new_visited_set.add(next_node)
+                    if next_node != start_node:
+                        new_visited_inter.add(next_node)
+
+                    next_beams.append({
+                        "current_node":  next_node,
+                        "time_elapsed":  time_elapsed + step_time,
+                        "visited_set":   new_visited_set,
+                        "visited_inter": new_visited_inter,
+                        "route":         beam["route"] + [next_node],
+                        "total_reward":  beam["total_reward"] + step_reward,
+                        "returned_home": next_node == start_node,
+                    })
+
+            if not next_beams:
+                break
+
+            next_beams.sort(key=lambda b: b["total_reward"], reverse=True)
+            beams = next_beams[:beam_width]
+
+            if all(b["returned_home"] for b in beams):
+                break
+
+        for beam in beams:
+            if not beam["returned_home"] and beam["current_node"] != start_node:
+                cn         = beam["current_node"]
+                day_offset = int(beam["time_elapsed"] // 14)
+                rm_day     = get_rm(min(start_day_idx + day_offset, max_day))
+                t_ret = (
+                    float(time_matrix.iloc[cn, start_node])
+                    if has_iloc_t else float(time_matrix[cn][start_node])
+                )
+                r_ret = float(rm_day.iloc[cn, start_node])
+                if beam["time_elapsed"] + t_ret <= max_duration + 1e-6:
+                    beam["time_elapsed"] += t_ret
+                    beam["total_reward"] += r_ret
+                    beam["route"].append(start_node)
+                    beam["returned_home"] = True
+
+        best_beam   = None
+        best_reward = -np.inf
+        for beam in beams:
+            is_valid = (
+                beam["returned_home"]
+                and len(beam["route"]) > 1
+                and beam["route"][0] == start_node
+                and beam["route"][-1] == start_node
+            )
+            if is_valid and beam["total_reward"] > best_reward:
+                best_reward = beam["total_reward"]
+                best_beam   = beam
+
+        if best_beam is None:
+            return None, -np.inf, np.inf
+
+        return best_beam["route"], best_beam["total_reward"], best_beam["time_elapsed"]
+
+    @torch.no_grad()
+    def greedy_action(
+        self,
+        current_node:           int,
+        start_node:             int,
+        visited_set:            set,
+        time_elapsed:           float,
+        step_count:             int,
+        reward_matrix_penalized,
+        time_matrix,
+        distance_arr:           np.ndarray,
+        max_duration:           float,
+        action_mask:            np.ndarray,   # (N,) int8 de RoutingEnv
+    ) -> int:
+        """Selección determinista (argmax de logits) para evaluación env-based."""
+        embeddings, h_t, _, _ = self._encode_step(
+            current_node, start_node, visited_set,
+            time_elapsed, step_count,
+            reward_matrix_penalized, time_matrix, distance_arr,
+            max_duration,
+        )
+        mask_t    = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
+        bool_mask = (mask_t == 0)
+        logits    = self.decoder._logits(h_t, embeddings, bool_mask)  # (1, N)
+        return int(logits[0].argmax().item())
+
     def act(
         self,
         current_node:           int,

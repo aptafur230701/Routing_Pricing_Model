@@ -32,7 +32,7 @@ from config import (
     TIME_VIOLATION_PENALTY,
 )
 from state_features import get_state_size, build_state
-from problem_data import sample_stochastic_reward
+from problem_data import sample_stochastic_reward, build_day_matrices
 
 
 class RoutingEnv(gym.Env):
@@ -46,11 +46,14 @@ class RoutingEnv(gym.Env):
 
     Parámetros
     ----------
-    time_matrix              : pd.DataFrame | np.ndarray  (num_nodes × num_nodes)
-    reward_matrix_penalized  : pd.DataFrame | np.ndarray  (diagonal = BIG_M_PENALTY)
-    noise_sigma              : float
-    num_nodes                : int
-    max_duration             : float, opcional (default: MAX_DURATION)
+    time_matrix   : pd.DataFrame | np.ndarray  (num_nodes × num_nodes)
+    rate_stack    : np.ndarray  [num_days, num_nodes, num_nodes]
+    loads_stack   : np.ndarray  [num_days, num_nodes, num_nodes]
+    distance_arr  : np.ndarray  (num_nodes × num_nodes)
+    diesel_arr    : np.ndarray  (num_nodes × num_nodes)
+    noise_sigma   : float
+    num_nodes     : int
+    max_duration  : float, opcional (default: MAX_DURATION)
     """
 
     metadata = {"render_modes": []}
@@ -58,7 +61,10 @@ class RoutingEnv(gym.Env):
     def __init__(
         self,
         time_matrix,
-        reward_matrix_penalized,
+        rate_stack: np.ndarray,
+        loads_stack: np.ndarray,
+        distance_arr: np.ndarray,
+        diesel_arr: np.ndarray,
         noise_sigma: float,
         num_nodes: int,
         max_duration: float = MAX_DURATION,
@@ -66,7 +72,10 @@ class RoutingEnv(gym.Env):
         super().__init__()
 
         self._time_matrix = time_matrix
-        self._reward_matrix_penalized = reward_matrix_penalized
+        self._rate_stack = rate_stack
+        self._loads_stack = loads_stack
+        self._distance_arr = distance_arr
+        self._diesel_arr = diesel_arr
         self._noise_sigma = noise_sigma
         self.num_nodes = num_nodes
         self.max_duration = max_duration
@@ -85,6 +94,7 @@ class RoutingEnv(gym.Env):
         self._time_elapsed: float = None
         self._visited_set: set = None
         self._step_count: int = None
+        self._start_day_idx: int = None
 
     # ─────────────────────────────────────────────────────────────────────────
     # Ciclo de vida del entorno
@@ -97,6 +107,11 @@ class RoutingEnv(gym.Env):
             self._start_node = int(options["start_node"])
         else:
             self._start_node = int(self.np_random.integers(0, self.num_nodes))
+
+        if options is not None and "start_day_idx" in options:
+            self._start_day_idx = int(options["start_day_idx"])
+        else:
+            self._start_day_idx = 0
 
         self._current_node = self._start_node
         self._time_elapsed = 0.0
@@ -152,14 +167,22 @@ class RoutingEnv(gym.Env):
         )
         return self._time_elapsed + float(step_time)
 
+    def _get_current_day_idx(self) -> int:
+        day_offset = int(self._time_elapsed // 14)
+        raw = self._start_day_idx + day_offset
+        return min(raw, self._rate_stack.shape[0] - 1)
+
     def _compute_reward(
         self, next_node: int, next_time: float, terminated: bool
     ) -> float:
-        raw_reward = (
-            self._reward_matrix_penalized.iloc[self._current_node, next_node]
-            if hasattr(self._reward_matrix_penalized, "iloc")
-            else float(self._reward_matrix_penalized[self._current_node][next_node])
+        current_day_idx = self._get_current_day_idx()
+        _, reward_matrix_penalized_step = build_day_matrices(
+            self._rate_stack[current_day_idx],
+            self._loads_stack[current_day_idx],
+            self._distance_arr,
+            self._diesel_arr,
         )
+        raw_reward = float(reward_matrix_penalized_step.iloc[self._current_node, next_node])
 
         if STOCHASTIC_MODE and self._noise_sigma > 0:
             step_reward = sample_stochastic_reward(
@@ -253,10 +276,6 @@ class RoutingEnv(gym.Env):
     # API pública auxiliar
     # ─────────────────────────────────────────────────────────────────────────
 
-    def update_reward_matrix(self, reward_matrix_penalized) -> None:
-        """Reemplaza la matriz de recompensas antes del próximo episodio."""
-        self._reward_matrix_penalized = reward_matrix_penalized
-
     def get_valid_actions(self) -> list:
         """Índices de nodos con acción válida en el estado actual."""
         return [i for i, m in enumerate(self._get_action_mask()) if m == 1]
@@ -280,6 +299,10 @@ class RoutingEnv(gym.Env):
     @property
     def visited_set(self) -> frozenset:
         return frozenset(self._visited_set)
+
+    @property
+    def current_day_idx(self) -> int:
+        return self._get_current_day_idx()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Auxiliar interno

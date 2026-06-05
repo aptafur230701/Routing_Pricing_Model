@@ -28,6 +28,7 @@ from config import (
     MAX_DURATION,
     DEVICE,
     SEED,
+    TRAIN_DAYS,
     get_episodes_per_node,
     AM_D_H, AM_N_HEADS, AM_N_LAYERS, AM_D_FF,
     PPO_N_EPISODES_PER_UPDATE, PPO_N_EPOCHS, PPO_BATCH_SIZE,
@@ -298,6 +299,7 @@ def run_am_training(
     total_episodes    = episodes_per_node * num_nodes
     n_updates         = max(1, total_episodes // n_episodes_per_update)
     num_days          = rate_stack.shape[0]
+    num_train_days    = min(TRAIN_DAYS, num_days)
 
     # ── Modelos ───────────────────────────────────────────────────────────────
     agent  = pretrained_agent  if pretrained_agent  is not None \
@@ -313,12 +315,12 @@ def run_am_training(
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=lr * 10)
 
     # ── Entorno ───────────────────────────────────────────────────────────────
-    _, rm_init = build_day_matrices(
-        rate_stack[0], loads_stack[0], distance_arr, diesel_arr
-    )
     env = RoutingEnv(
         time_matrix=time_matrix,
-        reward_matrix_penalized=rm_init,
+        rate_stack=rate_stack,
+        loads_stack=loads_stack,
+        distance_arr=distance_arr,
+        diesel_arr=diesel_arr,
         noise_sigma=noise_sigma,
         num_nodes=num_nodes,
         max_duration=MAX_DURATION,
@@ -350,13 +352,12 @@ def run_am_training(
             start_node = random.choice(candidates)
             node_ep_counts[start_node] += 1
 
-            # Samplear día aleatorio
-            day_idx = np.random.randint(0, num_days)
+            # Samplear día de inicio del episodio (sólo días de train)
+            start_day_idx = np.random.randint(0, num_train_days)
             _, rm_pen = build_day_matrices(
-                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+                rate_stack[start_day_idx], loads_stack[start_day_idx], distance_arr, diesel_arr
             )
-            env.update_reward_matrix(rm_pen)
-            obs, info = env.reset(options={"start_node": start_node})
+            obs, info = env.reset(options={"start_node": start_node, "start_day_idx": start_day_idx})
 
             ep_start_idx = len(buffer)
             ep_reward    = 0.0

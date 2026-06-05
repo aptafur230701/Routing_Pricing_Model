@@ -14,7 +14,6 @@ import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
 from config import (
     STOCHASTIC_MODE, MAX_DURATION,
     REWARD_SCALE_FACTOR,
@@ -83,6 +82,36 @@ def evaluate_stochastic(agent, start_node, time_matrix, reward_matrix_penalized,
     }
 
 
+# ── DRL env-based rollout (Modo B) ───────────────────────────
+def rollout_drl_env(
+    agent,
+    start_node:    int,
+    start_day_idx: int,
+    rm_pen_start,          # pd.DataFrame — día de inicio, para features del agente
+    time_matrix,
+    rate_stack:    np.ndarray,
+    loads_stack:   np.ndarray,
+    distance_arr:  np.ndarray,
+    diesel_arr:    np.ndarray,
+    max_duration:  float = MAX_DURATION,
+) -> tuple:
+    """Beam search con días de mercado dinámicos.
+
+    Delega en agent.beam_search_dynamic(): las decisiones usan features del día
+    de inicio (igual que training) y la recompensa acumulada usa la matriz del
+    día corriente según el time_elapsed de cada beam.
+    """
+    agent.eval()
+    try:
+        return agent.beam_search_dynamic(
+            start_node, start_day_idx, rm_pen_start,
+            time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
+            max_duration,
+        )
+    finally:
+        agent.train()
+
+
 # ── Solver comparison ─────────────────────────────────────────
 def run_solver_comparison(agent, time_matrix,
                            rate_stack, loads_stack, distance_arr, diesel_arr,
@@ -99,6 +128,7 @@ def run_solver_comparison(agent, time_matrix,
     mip_times         = []
     heuristic_times   = []
     drl_times         = []
+    drl_real_times    = []
     heuristic2_times  = []
     ga_times          = []
     lns_times         = []
@@ -131,11 +161,29 @@ def run_solver_comparison(agent, time_matrix,
             distance_arr=distance_arr)
         drl_times.append(time.time() - t0)
         row.update({
-            'DRL Route':          drl_route,
-            'DRL Det Reward':  drl_reward   if drl_route else -np.inf,
-            'DRL Duration':       drl_duration if drl_route else np.inf,
-            'DRL Valid':          drl_route is not None and drl_route[0] == drl_route[-1],
+            'DRL Route':      drl_route,
+            'DRL Det Reward': drl_reward   if drl_route else -np.inf,
+            'DRL Duration':   drl_duration if drl_route else np.inf,
+            'DRL Valid':      drl_route is not None and drl_route[0] == drl_route[-1],
         })
+
+        # DRL — Realized (Modo B): rollout env con días dinámicos
+        # Decisiones basadas en features del día de inicio; recompensa económica
+        # calculada con la matriz del día corriente en cada arco.
+        t0 = time.time()
+        drl_real_route, drl_real_reward, drl_real_duration = rollout_drl_env(
+            agent, s, day_idx, reward_matrix_penalized,
+            time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
+        )
+        drl_real_times.append(time.time() - t0)
+        drl_real_valid = drl_real_route is not None
+        row.update({
+            'DRL Real Route':    drl_real_route,
+            'DRL Real Reward':   drl_real_reward   if drl_real_valid else -np.inf,
+            'DRL Real Duration': drl_real_duration if drl_real_valid else np.inf,
+            'DRL Real Valid':    drl_real_valid,
+        })
+
         # DRL — Stochastic evaluation (con ruido, mide robustez bajo incertidumbre)
         stoch = evaluate_stochastic(agent, s, time_matrix, reward_matrix_penalized,
                                      num_nodes, noise_sigma,
@@ -145,7 +193,11 @@ def run_solver_comparison(agent, time_matrix,
             'DRL Stoch Std':    stoch['std_reward'],
             'DRL Stoch Valid%': stoch['valid_fraction'] * 100,
         })
-        print(f"  DRL Det: {drl_route} | reward {drl_reward:.1f} | stoch mean {stoch['mean_reward']:.1f} ± {stoch['std_reward']:.1f}")
+        print(
+            f"  DRL Det:  {drl_route} | reward {drl_reward:.1f}"
+            f" | stoch mean {stoch['mean_reward']:.1f} ± {stoch['std_reward']:.1f}"
+        )
+        print(f"  DRL Real: {drl_real_route} | reward {drl_real_reward:.1f} (días dinámicos)")
 
         # MIP
         t0 = time.time()
@@ -237,6 +289,7 @@ def run_solver_comparison(agent, time_matrix,
             return float('nan')
 
         row['DRL Gap (%)']       = gap(row['DRL Det Reward'],    row['DRL Valid'])
+        row['DRL Real Gap (%)']  = gap(row['DRL Real Reward'],  row['DRL Real Valid'])
         row['Heuristic Gap (%)'] = gap(row['Heuristic Reward'], row['Heuristic Valid'])
         row['2Opt Gap (%)']      = gap(row['2Opt Reward'],      row['2Opt Valid'])
         row['GA Gap (%)']        = gap(row['GA Reward'],        row['GA Valid'])
@@ -249,7 +302,8 @@ def run_solver_comparison(agent, time_matrix,
 
     timing = {
         'mip_times': mip_times, 'heuristic_times': heuristic_times,
-        'drl_times': drl_times, 'heuristic2_times': heuristic2_times,
+        'drl_times': drl_times, 'drl_real_times': drl_real_times,
+        'heuristic2_times': heuristic2_times,
         'ga_times': ga_times,   'lns_times': lns_times,
         'hga_lns_times': hga_lns_times,
     }
