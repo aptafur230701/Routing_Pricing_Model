@@ -24,6 +24,7 @@ from attention_encoder import (
     AttentionEncoder,
     ContextNetwork,
     build_node_features,
+    build_market_features,
     build_temporal_features,
     N_NODE_FEATURES,
 )
@@ -61,7 +62,7 @@ class AMRoutingAgent(nn.Module):
         self.device    = device or torch.device("cpu")
 
         self.encoder     = AttentionEncoder(N_NODE_FEATURES, d_h, n_heads, n_layers, d_ff)
-        self.context_net = ContextNetwork(d_h, n_market=0)
+        self.context_net = ContextNetwork(d_h, n_market=1)
         self.decoder     = AttentionDecoder(d_h, n_heads_glimpse=n_heads, clip_C=clip_C)
 
         self.to(self.device)
@@ -79,6 +80,9 @@ class AMRoutingAgent(nn.Module):
         time_matrix,
         distance_arr:           np.ndarray,
         max_duration:           float,
+        ltr_stack:              np.ndarray,   # [num_nodes, 120]
+        trucks_stack:           np.ndarray,   # [num_nodes, 120, 3]
+        day_idx:                int,
     ):
         """
         Construye tensores de entrada y ejecuta encoder + context_net.
@@ -87,26 +91,39 @@ class AMRoutingAgent(nn.Module):
         -------
         embeddings : Tensor (1, N, d_h)
         h_t        : Tensor (1, d_h)
-        node_feats : np.ndarray (N, 5)
+        node_feats : np.ndarray (N, 6)
         temporal   : np.ndarray (3,)
+        market     : np.ndarray (1,)
         """
+        # Extraer numpy de time_matrix para cálculo de delta_idx en trucks
+        if hasattr(time_matrix, "to_numpy"):
+            time_matrix_arr = time_matrix.to_numpy(dtype=float)
+        else:
+            time_matrix_arr = np.asarray(time_matrix, dtype=float)
+
+        trucks_day = trucks_stack[:, day_idx, :]   # (num_nodes, 3)
+
         node_feats = build_node_features(
             current_node, start_node, visited_set,
             reward_matrix_penalized, time_matrix, distance_arr,
             self.num_nodes, max_duration,
+            trucks_stack=trucks_day,
+            time_matrix_arr=time_matrix_arr,
         )
         temporal = build_temporal_features(
             time_elapsed, step_count, max_duration, self.num_nodes
         )
+        market = build_market_features(current_node, day_idx, ltr_stack)
 
-        feats_t    = torch.from_numpy(node_feats).unsqueeze(0).to(self.device)   # (1,N,5)
+        feats_t    = torch.from_numpy(node_feats).unsqueeze(0).to(self.device)   # (1,N,6)
         temporal_t = torch.from_numpy(temporal).unsqueeze(0).to(self.device)     # (1,3)
+        market_t   = torch.from_numpy(market).unsqueeze(0).to(self.device)       # (1,1)
 
-        embeddings, graph_emb = self.encoder(feats_t)               # (1,N,d_h), (1,d_h)
-        current_emb = embeddings[:, current_node, :]                # (1, d_h)
-        h_t = self.context_net(graph_emb, current_emb, temporal_t)  # (1, d_h)
+        embeddings, graph_emb = self.encoder(feats_t)                            # (1,N,d_h), (1,d_h)
+        current_emb = embeddings[:, current_node, :]                             # (1, d_h)
+        h_t = self.context_net(graph_emb, current_emb, temporal_t, market_t)    # (1, d_h)
 
-        return embeddings, h_t, node_feats, temporal
+        return embeddings, h_t, node_feats, temporal, market
 
     @staticmethod
     def _build_mask(
@@ -135,6 +152,9 @@ class AMRoutingAgent(nn.Module):
         distance_arr:           np.ndarray,
         max_duration:           float,
         beam_width:             int,
+        ltr_stack:              np.ndarray,   # [num_nodes, 120]
+        trucks_stack:           np.ndarray,   # [num_nodes, 120, 3]
+        day_idx:                int,
     ):
         """
         Rollout unificado con beam search para cualquier beam_width >= 1.
@@ -179,11 +199,11 @@ class AMRoutingAgent(nn.Module):
                 time_elapsed = beam["time_elapsed"]
                 visited_set  = set(beam["visited_set"])
 
-                embeddings, h_t, _, _ = self._encode_step(
+                embeddings, h_t, _, _, _ = self._encode_step(
                     current_node, start_node, visited_set,
                     time_elapsed, step,
                     reward_matrix_penalized, time_matrix, distance_arr,
-                    max_duration,
+                    max_duration, ltr_stack, trucks_stack, day_idx,
                 )
 
                 # Máscara base: self-loop + intermedios visitados
@@ -314,6 +334,9 @@ class AMRoutingAgent(nn.Module):
         distance_arr:           np.ndarray,
         max_duration:           float = MAX_DURATION,
         beam_width:             int   = None,
+        ltr_stack:              np.ndarray = None,   # [num_nodes, 120]
+        trucks_stack:           np.ndarray = None,   # [num_nodes, 120, 3]
+        day_idx:                int        = 0,
     ):
         """
         Rollout determinista (sin gradientes) con el modelo actual.
@@ -347,6 +370,7 @@ class AMRoutingAgent(nn.Module):
             return self._beam_search(
                 start_node, reward_matrix_penalized, time_matrix,
                 distance_arr, max_duration, beam_width,
+                ltr_stack, trucks_stack, day_idx,
             )
         finally:
             self.train()
@@ -356,7 +380,6 @@ class AMRoutingAgent(nn.Module):
         self,
         start_node:    int,
         start_day_idx: int,
-        rm_pen_start,           # pd.DataFrame — día de inicio, solo para features
         time_matrix,
         rate_stack:    np.ndarray,
         loads_stack:   np.ndarray,
@@ -364,11 +387,13 @@ class AMRoutingAgent(nn.Module):
         diesel_arr:    np.ndarray,
         max_duration:  float = MAX_DURATION,
         beam_width:    int   = None,
+        ltr_stack:     np.ndarray = None,   # [num_nodes, 120]
+        trucks_stack:  np.ndarray = None,   # [num_nodes, 120, 3]
     ):
         """Beam search con días de mercado dinámicos por beam.
 
-        Features del agente : rm_pen_start (día de inicio, igual que training).
-        Recompensa acumulada: matriz del día corriente según time_elapsed de cada beam,
+        Features del agente: matriz del día corriente de cada beam (igual que training).
+        Recompensa acumulada: misma matriz del día corriente según time_elapsed de cada beam,
                               donde day_idx = start_day_idx + int(time_elapsed // 14).
         """
         from config import get_beam_width as _get_beam_width
@@ -412,13 +437,14 @@ class AMRoutingAgent(nn.Module):
                 visited_set  = set(beam["visited_set"])
 
                 day_offset = int(time_elapsed // 14)
-                rm_day     = get_rm(min(start_day_idx + day_offset, max_day))
+                day_idx    = min(start_day_idx + day_offset, max_day)
+                rm_day     = get_rm(day_idx)
 
-                embeddings, h_t, _, _ = self._encode_step(
+                embeddings, h_t, _, _, _ = self._encode_step(
                     current_node, start_node, visited_set,
                     time_elapsed, step,
-                    rm_pen_start, time_matrix, distance_arr,
-                    max_duration,
+                    rm_day, time_matrix, distance_arr,
+                    max_duration, ltr_stack, trucks_stack, day_idx,
                 )
 
                 mask_int = self._build_mask(
@@ -539,13 +565,16 @@ class AMRoutingAgent(nn.Module):
         distance_arr:           np.ndarray,
         max_duration:           float,
         action_mask:            np.ndarray,   # (N,) int8 de RoutingEnv
+        ltr_stack:              np.ndarray = None,
+        trucks_stack:           np.ndarray = None,
+        day_idx:                int        = 0,
     ) -> int:
         """Selección determinista (argmax de logits) para evaluación env-based."""
-        embeddings, h_t, _, _ = self._encode_step(
+        embeddings, h_t, _, _, _ = self._encode_step(
             current_node, start_node, visited_set,
             time_elapsed, step_count,
             reward_matrix_penalized, time_matrix, distance_arr,
-            max_duration,
+            max_duration, ltr_stack, trucks_stack, day_idx,
         )
         mask_t    = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
         bool_mask = (mask_t == 0)
@@ -564,6 +593,9 @@ class AMRoutingAgent(nn.Module):
         distance_arr:           np.ndarray,
         max_duration:           float,
         action_mask:            np.ndarray,   # (N,) int8 de RoutingEnv
+        ltr_stack:              np.ndarray = None,
+        trucks_stack:           np.ndarray = None,
+        day_idx:                int        = 0,
     ):
         """
         Paso estocástico para entrenamiento PPO.
@@ -574,11 +606,11 @@ class AMRoutingAgent(nn.Module):
         log_prob : Tensor escalar
         entropy  : Tensor escalar
         """
-        embeddings, h_t, _, _ = self._encode_step(
+        embeddings, h_t, _, _, _ = self._encode_step(
             current_node, start_node, visited_set,
             time_elapsed, step_count,
             reward_matrix_penalized, time_matrix, distance_arr,
-            max_duration,
+            max_duration, ltr_stack, trucks_stack, day_idx,
         )
         mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
         action_t, log_prob, entropy = self.decoder.act(h_t, embeddings, mask_t)
@@ -597,6 +629,9 @@ class AMRoutingAgent(nn.Module):
         distance_arr:           np.ndarray,
         max_duration:           float,
         action_mask:            np.ndarray,   # (N,) int8 de RoutingEnv
+        ltr_stack:              np.ndarray = None,
+        trucks_stack:           np.ndarray = None,
+        day_idx:                int        = 0,
     ):
         """
         Paso estocástico para recolección PPO: samplea acción y estima valor.
@@ -607,19 +642,20 @@ class AMRoutingAgent(nn.Module):
         log_prob   : Tensor escalar
         entropy    : Tensor escalar
         value      : float
-        node_feats : np.ndarray (N, 5)
+        node_feats : np.ndarray (N, 6)
         temporal   : np.ndarray (3,)
+        market     : np.ndarray (1,)
         """
-        embeddings, h_t, node_feats, temporal = self._encode_step(
+        embeddings, h_t, node_feats, temporal, market = self._encode_step(
             current_node, start_node, visited_set,
             time_elapsed, step_count,
             reward_matrix_penalized, time_matrix, distance_arr,
-            max_duration,
+            max_duration, ltr_stack, trucks_stack, day_idx,
         )
         value  = critic(h_t).item()
         mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
         action_t, log_prob, entropy = self.decoder.act(h_t, embeddings, mask_t)
-        return int(action_t.item()), log_prob.squeeze(0), entropy.squeeze(0), value, node_feats, temporal
+        return int(action_t.item()), log_prob.squeeze(0), entropy.squeeze(0), value, node_feats, temporal, market
 
     def estimate_value(
         self,
@@ -633,12 +669,15 @@ class AMRoutingAgent(nn.Module):
         time_matrix,
         distance_arr:           np.ndarray,
         max_duration:           float,
+        ltr_stack:              np.ndarray = None,
+        trucks_stack:           np.ndarray = None,
+        day_idx:                int        = 0,
     ) -> float:
         """Estima V(s) para bootstrap en episodios truncados."""
-        _, h_t, _, _ = self._encode_step(
+        _, h_t, _, _, _ = self._encode_step(
             current_node, start_node, visited_set,
             time_elapsed, step_count,
             reward_matrix_penalized, time_matrix, distance_arr,
-            max_duration,
+            max_duration, ltr_stack, trucks_stack, day_idx,
         )
         return critic(h_t).item()

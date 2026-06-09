@@ -55,8 +55,9 @@ class RolloutBuffer:
     """
 
     def __init__(self):
-        self.node_feats    = []   # list of np.ndarray (N, 5)
+        self.node_feats    = []   # list of np.ndarray (N, 6)
         self.temporal_feats = []  # list of np.ndarray (3,)
+        self.market_feats  = []   # list of np.ndarray (1,)
         self.current_nodes = []   # list of int
         self.masks         = []   # list of np.ndarray (N,) int8
         self.actions       = []   # list of int
@@ -81,9 +82,12 @@ class RolloutBuffer:
         log_prob:      float,
         value:         float,
         done:          bool,
+        market_feats:  np.ndarray = None,   # (1,)
     ):
         self.node_feats.append(node_feats)
         self.temporal_feats.append(temporal)
+        self.market_feats.append(market_feats if market_feats is not None
+                                 else np.zeros(1, dtype=np.float32))
         self.current_nodes.append(current_node)
         self.masks.append(mask)
         self.actions.append(action)
@@ -182,13 +186,14 @@ class RolloutBuffer:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _forward(
-    agent:        AMRoutingAgent,
-    critic:       CriticHead,
-    node_feats_t: torch.Tensor,    # (B, N, 5)
-    temporal_t:   torch.Tensor,    # (B, 3)
-    current_nodes: torch.Tensor,   # (B,) int64
-    mask_t:       torch.Tensor,    # (B, N) int8
-    actions_t:    torch.Tensor = None,  # (B,) int64 — None en recolección
+    agent:          AMRoutingAgent,
+    critic:         CriticHead,
+    node_feats_t:   torch.Tensor,    # (B, N, 6)
+    temporal_t:     torch.Tensor,    # (B, 3)
+    current_nodes:  torch.Tensor,    # (B,) int64
+    mask_t:         torch.Tensor,    # (B, N) int8
+    actions_t:      torch.Tensor = None,   # (B,) int64 — None en recolección
+    market_feats_t: torch.Tensor = None,   # (B, 1)
 ):
     """
     Ejecuta encoder → context → decoder → critic para un batch.
@@ -216,7 +221,7 @@ def _forward(
     current_emb = embeddings[torch.arange(B), current_nodes, :]   # (B, d_h)
     check_tensor("current_emb", current_emb)
 
-    h_t = agent.context_net(graph_emb, current_emb, temporal_t)   # (B, d_h)
+    h_t = agent.context_net(graph_emb, current_emb, temporal_t, market_feats_t)   # (B, d_h)
     check_tensor("context h_t", h_t)
 
     values = critic(h_t)                                           # (B,)
@@ -257,6 +262,8 @@ def run_am_training(
     num_nodes:    int,
     pretrained_agent:  AMRoutingAgent = None,
     pretrained_critic: CriticHead     = None,
+    ltr_stack:    np.ndarray = None,   # [num_nodes, 120]
+    trucks_stack: np.ndarray = None,   # [num_nodes, 120, 3]
 ) -> tuple:
     """
     Entrena AMRoutingAgent + CriticHead con PPO.
@@ -270,6 +277,8 @@ def run_am_training(
     diesel_arr    : np.ndarray [N, N]
     noise_sigma   : float
     num_nodes     : int
+    ltr_stack     : np.ndarray [num_nodes, 120] — LTR por hub y día
+    trucks_stack  : np.ndarray [num_nodes, 120, 3] — camiones por hub, día y delta
 
     Retorna
     -------
@@ -354,9 +363,6 @@ def run_am_training(
 
             # Samplear día de inicio del episodio (sólo días de train)
             start_day_idx = np.random.randint(0, num_train_days)
-            _, rm_pen = build_day_matrices(
-                rate_stack[start_day_idx], loads_stack[start_day_idx], distance_arr, diesel_arr
-            )
             obs, info = env.reset(options={"start_node": start_node, "start_day_idx": start_day_idx})
 
             ep_start_idx = len(buffer)
@@ -364,18 +370,33 @@ def run_am_training(
             last_value   = 0.0
             ep_truncated = False
 
+            _rm_cache = {}
+            def get_rm_pen(day_idx):
+                if day_idx not in _rm_cache:
+                    _, rm = build_day_matrices(
+                        rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+                    )
+                    _rm_cache[day_idx] = rm
+                return _rm_cache[day_idx]
+
             with torch.no_grad():
                 for step in range(num_nodes):  # defensive ceiling; env terminates naturally
                     mask = info["action_mask"]   # (N,) int8
                     current_node_before_step = env.current_node
 
-                    action, log_prob, _, value, nf, tf = agent.act_with_value(
+                    # Construir rm_pen con el día actual del entorno en este paso
+                    current_day = env.current_day_idx
+                    rm_pen = get_rm_pen(current_day)
+
+                    action, log_prob, _, value, nf, tf, mf = agent.act_with_value(
                         critic,
                         env.current_node, env.start_node, env.visited_set,
                         env.time_elapsed, step,
                         rm_pen, time_matrix, distance_arr,
                         MAX_DURATION,
                         action_mask=mask,
+                        ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+                        day_idx=current_day,
                     )
 
                     next_obs, reward, terminated, truncated, info = env.step(action)
@@ -388,12 +409,16 @@ def run_am_training(
                         # y también a ep_reward (línea 360), contándolo dos veces.
                         # AHORA: solo se registra en ep_reward como señal de diagnóstico,
                         # pero NO entra al buffer — GAE lo maneja vía last_value.
+                        current_day_trunc = env.current_day_idx
+                        rm_pen_trunc = get_rm_pen(current_day_trunc)
                         last_value = agent.estimate_value(
                             critic,
                             env.current_node, env.start_node, env.visited_set,
                             env.time_elapsed, step + 1,
-                            rm_pen, time_matrix, distance_arr,
+                            rm_pen_trunc, time_matrix, distance_arr,
                             MAX_DURATION,
+                            ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+                            day_idx=current_day_trunc,
                         )
 
                     buffer.add(
@@ -406,6 +431,7 @@ def run_am_training(
                         log_prob=log_prob.item(),
                         value=value,
                         done=done,
+                        market_feats=mf,
                     )
 
                     ep_reward += reward
@@ -443,10 +469,13 @@ def run_am_training(
                 # Reconstruir tensores del batch
                 nf_b   = torch.from_numpy(
                     np.stack([buffer.node_feats[i] for i in idx_batch])
-                ).to(DEVICE)                                           # (B, N, 5)
+                ).to(DEVICE)                                           # (B, N, 6)
                 tf_b   = torch.from_numpy(
                     np.stack([buffer.temporal_feats[i] for i in idx_batch])
                 ).to(DEVICE)                                           # (B, 3)
+                mf_b   = torch.from_numpy(
+                    np.stack([buffer.market_feats[i] for i in idx_batch])
+                ).to(DEVICE)                                           # (B, 1)
                 cn_b   = torch.tensor(
                     [buffer.current_nodes[i] for i in idx_batch],
                     dtype=torch.long
@@ -489,7 +518,8 @@ def run_am_training(
                 try:
                     # Forward con gradientes
                     _, new_lp, entropy, new_val = _forward(
-                        agent, critic, nf_b, tf_b, cn_b, mask_b, actions_t=act_b
+                        agent, critic, nf_b, tf_b, cn_b, mask_b,
+                        actions_t=act_b, market_feats_t=mf_b,
                     )
 
                     # ── Loss del actor (PPO-Clip) ────────────────────────────

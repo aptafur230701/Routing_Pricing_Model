@@ -30,7 +30,8 @@ from Solvers import (
 # ── Route generation ─────────────────────────────────────────
 def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penalized,
                             num_nodes, max_duration=MAX_DURATION,
-                            distance_arr=None):
+                            distance_arr=None,
+                            ltr_stack=None, trucks_stack=None, day_idx=0):
     """Greedy rollout with the trained AMRoutingAgent (no grad).
 
     Delegates to agent.generate_route() without explicit beam_width —
@@ -41,6 +42,7 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
     route, reward, duration = agent.generate_route(
         start_node, reward_matrix_penalized, time_matrix,
         distance_arr, max_duration,
+        ltr_stack=ltr_stack, trucks_stack=trucks_stack, day_idx=day_idx,
     )
     return route, reward, duration
 
@@ -48,7 +50,7 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
 # ── Stochastic evaluation ─────────────────────────────────────
 def evaluate_stochastic(agent, start_node, time_matrix, reward_matrix_penalized,
                          num_nodes, noise_sigma, n_episodes=N_EVAL_EPISODES,
-                         distance_arr=None):
+                         distance_arr=None, ltr_stack=None, trucks_stack=None, day_idx=0):
     rewards   = []
     durations = []
     valid     = 0
@@ -56,7 +58,8 @@ def evaluate_stochastic(agent, start_node, time_matrix, reward_matrix_penalized,
     for _ in range(n_episodes):
         route, reward, duration = generate_optimal_route(
             agent, start_node, time_matrix, reward_matrix_penalized, num_nodes,
-            distance_arr=distance_arr)
+            distance_arr=distance_arr,
+            ltr_stack=ltr_stack, trucks_stack=trucks_stack, day_idx=day_idx)
         if route is not None:
             if STOCHASTIC_MODE and noise_sigma > 0:
                 reward = reward + np.random.normal(0, noise_sigma)
@@ -87,26 +90,27 @@ def rollout_drl_env(
     agent,
     start_node:    int,
     start_day_idx: int,
-    rm_pen_start,          # pd.DataFrame — día de inicio, para features del agente
     time_matrix,
     rate_stack:    np.ndarray,
     loads_stack:   np.ndarray,
     distance_arr:  np.ndarray,
     diesel_arr:    np.ndarray,
-    max_duration:  float = MAX_DURATION,
+    max_duration:  float      = MAX_DURATION,
+    ltr_stack:     np.ndarray = None,
+    trucks_stack:  np.ndarray = None,
 ) -> tuple:
     """Beam search con días de mercado dinámicos.
 
-    Delega en agent.beam_search_dynamic(): las decisiones usan features del día
-    de inicio (igual que training) y la recompensa acumulada usa la matriz del
-    día corriente según el time_elapsed de cada beam.
+    Delega en agent.beam_search_dynamic(): las decisiones y la recompensa acumulada
+    usan la matriz del día corriente según el time_elapsed de cada beam.
     """
     agent.eval()
     try:
         return agent.beam_search_dynamic(
-            start_node, start_day_idx, rm_pen_start,
+            start_node, start_day_idx,
             time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
             max_duration,
+            ltr_stack=ltr_stack, trucks_stack=trucks_stack,
         )
     finally:
         agent.train()
@@ -115,7 +119,8 @@ def rollout_drl_env(
 # ── Solver comparison ─────────────────────────────────────────
 def run_solver_comparison(agent, time_matrix,
                            rate_stack, loads_stack, distance_arr, diesel_arr,
-                           noise_sigma, num_nodes):
+                           noise_sigma, num_nodes,
+                           ltr_stack=None, trucks_stack=None):
     """Run DRL + all benchmark solvers for every start node.
 
     Para cada nodo de inicio se usa un día del set de evaluación (días
@@ -158,7 +163,8 @@ def run_solver_comparison(agent, time_matrix,
         t0 = time.time()
         drl_route, drl_reward, drl_duration = generate_optimal_route(
             agent, s, time_matrix, reward_matrix_penalized, num_nodes,
-            distance_arr=distance_arr)
+            distance_arr=distance_arr,
+            ltr_stack=ltr_stack, trucks_stack=trucks_stack, day_idx=day_idx)
         drl_times.append(time.time() - t0)
         row.update({
             'DRL Route':      drl_route,
@@ -172,8 +178,9 @@ def run_solver_comparison(agent, time_matrix,
         # calculada con la matriz del día corriente en cada arco.
         t0 = time.time()
         drl_real_route, drl_real_reward, drl_real_duration = rollout_drl_env(
-            agent, s, day_idx, reward_matrix_penalized,
+            agent, s, day_idx,
             time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
+            ltr_stack=ltr_stack, trucks_stack=trucks_stack,
         )
         drl_real_times.append(time.time() - t0)
         drl_real_valid = drl_real_route is not None
@@ -187,7 +194,9 @@ def run_solver_comparison(agent, time_matrix,
         # DRL — Stochastic evaluation (con ruido, mide robustez bajo incertidumbre)
         stoch = evaluate_stochastic(agent, s, time_matrix, reward_matrix_penalized,
                                      num_nodes, noise_sigma,
-                                     distance_arr=distance_arr)
+                                     distance_arr=distance_arr,
+                                     ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+                                     day_idx=day_idx)
         row.update({
             'DRL Stoch Mean':   stoch['mean_reward'],
             'DRL Stoch Std':    stoch['std_reward'],

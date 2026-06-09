@@ -117,6 +117,13 @@ def transfer_checkpoint(
     """
     Transfiere los pesos de un checkpoint entrenado a un agente de mayor tamaño.
 
+    Transfer parcial intencional cuando la arquitectura fuente difiere de la destino
+    (por ejemplo, checkpoints entrenados con N_NODE_FEATURES=5 / n_market=0):
+      · encoder.input_proj  — shape [d_h, 5] → [d_h, 6]: se descarta, se re-inicializa.
+      · context_net.proj    — shape depende de n_market: se descarta, se re-inicializa.
+      · Resto de capas (Transformer, decoder, critic): se transfieren íntegras.
+    La comparación de shapes por key garantiza esto sin strict=False.
+
     Parámetros
     ----------
     source_checkpoint : ruta al .pt del modelo fuente.
@@ -134,7 +141,7 @@ def transfer_checkpoint(
 
     checkpoint = torch.load(source_checkpoint, map_location=DEVICE)
 
-    # Instanciar modelos destino
+    # Instanciar modelos destino con la arquitectura actual (N_NODE_FEATURES=6, n_market=1)
     agent  = AMRoutingAgent(
         num_nodes=target_num_nodes,
         d_h=d_h, n_heads=n_heads, n_layers=n_layers, d_ff=d_ff,
@@ -142,7 +149,10 @@ def transfer_checkpoint(
     )
     critic = CriticHead(d_h).to(DEVICE)
 
-    # Transferir pesos — filtrar por forma por seguridad
+    # Transferir pesos — filtrar por forma por seguridad.
+    # Las capas con shape distinta (input_proj, context_net) se omiten y quedan
+    # con inicialización aleatoria, lo que es el comportamiento correcto para
+    # transfer learning parcial entre arquitecturas con distinto número de features.
     agent_sd  = agent.state_dict()
     critic_sd = critic.state_dict()
 

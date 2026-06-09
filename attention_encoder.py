@@ -30,13 +30,16 @@ Compatibilidad:
   · Las matrices (reward, time, distance) aceptan pd.DataFrame o np.ndarray.
 """
 
+import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from config import LTR_CLIP, TRUCKS_CLIP
+
 # Número de features por nodo — debe coincidir con build_node_features()
-N_NODE_FEATURES = 5
+N_NODE_FEATURES = 6
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -52,12 +55,14 @@ def build_node_features(
     distance_arr:           np.ndarray,  # (N×N)
     num_nodes:              int,
     max_duration:           float,
+    trucks_stack:           np.ndarray = None,  # (N, 3) — camiones por nodo×delta para el día actual
+    time_matrix_arr:        np.ndarray = None,  # (N, N) numpy — para cálculo de delta_idx
 ) -> np.ndarray:
     """
     Construye la matriz de features de nodos para el encoder.
 
     Cada fila j contiene las features del nodo j vistas desde current_node:
-      [reward_norm, time_norm, dist_norm, is_depot, visited]
+      [reward_norm, time_norm, dist_norm, is_depot, visited, trucks_norm]
 
     La diagonal de reward_matrix_penalized tiene BIG_M_PENALTY (-1e9).
     Se recorta a [-1e4, 1e4] antes de normalizar para evitar desbordamientos.
@@ -72,6 +77,8 @@ def build_node_features(
     distance_arr             : matriz de distancias (np.ndarray).
     num_nodes                : número de nodos del grafo.
     max_duration             : límite temporal del episodio (horas).
+    trucks_stack             : camiones por (nodo, delta) para el día actual — shape (N, 3).
+    time_matrix_arr          : time_matrix como numpy array para cálculo de delta_idx.
 
     Retorna
     -------
@@ -94,6 +101,12 @@ def build_node_features(
         feats[j, 2] = float(distance_arr[current_node, j])
         feats[j, 3] = 1.0 if j == start_node else 0.0
         feats[j, 4] = 1.0 if j in visited_set else 0.0
+
+        if trucks_stack is not None and time_matrix_arr is not None:
+            travel_hours = float(time_matrix_arr[current_node, j])
+            delta_idx = max(0, min(2, math.ceil(travel_hours / 14.0) - 1))
+            trucks_val = float(trucks_stack[j, delta_idx])
+            feats[j, 5] = min(trucks_val, TRUCKS_CLIP) / TRUCKS_CLIP
 
     # Recortar reward para evitar BIG_M_PENALTY (-1e9) en la diagonal
     feats[:, 0] = np.clip(feats[:, 0], -1e4, 1e4)
@@ -287,7 +300,7 @@ class ContextNetwork(nn.Module):
     n_market : int — número de features de mercado adicionales (default 0).
     """
 
-    def __init__(self, d_h: int, n_market: int = 0):
+    def __init__(self, d_h: int, n_market: int = 1):
         super().__init__()
         n_temporal = 3          # time_norm, remaining_steps_norm, progress_norm
         d_in = 2 * d_h + n_temporal + n_market
@@ -313,6 +326,24 @@ class ContextNetwork(nn.Module):
             parts.append(market_feats)
         h = torch.cat(parts, dim=-1)
         return self.proj(h)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Utilidad: features de mercado para ContextNetwork
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_market_features(
+    current_node: int,
+    day_idx:      int,
+    ltr_stack:    np.ndarray,   # [num_nodes, 120]
+) -> np.ndarray:
+    """Construye el vector de market features (1,) para ContextNetwork.
+
+    [0] ltr_norm — LTR del hub actual en el día actual, normalizado a [0,1].
+    """
+    ltr_raw  = float(ltr_stack[current_node, day_idx])
+    ltr_norm = min(ltr_raw, LTR_CLIP) / LTR_CLIP
+    return np.array([ltr_norm], dtype=np.float32)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

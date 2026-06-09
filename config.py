@@ -52,6 +52,10 @@ PPO_GRAD_CLIP             = 0.5    # Clipping de gradiente para PPO
 # ── Train / eval split ───────────────────────────────────────
 TRAIN_DAYS = 90   # días usados para entrenamiento; el resto (días 90-119) queda para evaluación
 
+# ── Market signal normalisation clamps ───────────────────────
+LTR_CLIP    = 200.0   # p95 del LTR es 124; 200 es techo seguro
+TRUCKS_CLIP =  50.0   # p95 de trucks delta=1 es 45
+
 # ── Reproducibility ───────────────────────────────────────────
 SEED = 42
 
