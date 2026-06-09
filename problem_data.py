@@ -22,7 +22,7 @@ import pandas as pd
 
 from config import (
     MPG,
-    STOCHASTIC_MODE, NOISE_FRACTION,
+    STOCHASTIC_MODE, NOISE_FRACTION, TRAIN_NOISE_FRACTION,
     BIG_M_PENALTY, MARGINAL_COST_SIN_DIESEL,
     TRAIN_DAYS,
 )
@@ -143,13 +143,13 @@ def load_matrices(num_nodes: int) -> tuple:
         rewards_day = (revenue - cost).flatten()
         daily_stds.append(np.std(rewards_day))
     reward_std  = np.mean(daily_stds)
-    noise_sigma = NOISE_FRACTION * reward_std if STOCHASTIC_MODE else 0.0
+    noise_sigma = TRAIN_NOISE_FRACTION * reward_std if STOCHASTIC_MODE else 0.0
 
     eval_days = num_days - train_days
     print(f"Multi-day data  : {num_days} días totales | train={train_days} | eval={eval_days}")
     print(f"Stochastic mode : {STOCHASTIC_MODE} | "
         f"Noise sigma: {noise_sigma:.1f} raw units "
-        f"({NOISE_FRACTION*100:.0f}% of intra-day std {reward_std:.1f})")
+        f"({TRAIN_NOISE_FRACTION*100:.0f}% of intra-day std {reward_std:.1f})")
 
     return time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, noise_sigma, \
            ltr_stack, trucks_stack

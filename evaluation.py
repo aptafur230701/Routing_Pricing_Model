@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from config import (
     STOCHASTIC_MODE, MAX_DURATION,
     REWARD_SCALE_FACTOR,
-    N_EVAL_EPISODES, NOISE_FRACTION, SEED, TRAIN_DAYS,
+    N_EVAL_EPISODES, NOISE_FRACTION, EVAL_NOISE_FRACTION, SEED, TRAIN_DAYS,
 )
 from problem_data import sample_stochastic_reward, build_day_matrices
 from Solvers import (
@@ -48,40 +48,67 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
 
 
 # ── Stochastic evaluation ─────────────────────────────────────
-def evaluate_stochastic(agent, start_node, time_matrix, reward_matrix_penalized,
-                         num_nodes, noise_sigma, n_episodes=N_EVAL_EPISODES,
-                         distance_arr=None, ltr_stack=None, trucks_stack=None, day_idx=0):
+def evaluate_stochastic(agent, start_node, start_day_idx,
+                        time_matrix, rate_stack, loads_stack,
+                        distance_arr, diesel_arr,
+                        num_nodes, eval_noise_sigma,
+                        n_episodes=N_EVAL_EPISODES,
+                        max_duration=MAX_DURATION,
+                        ltr_stack=None, trucks_stack=None,
+                        cvar_alpha=0.20):
+    """Distribución de reward bajo rollouts estocásticos con días dinámicos.
+
+    Cada episodio ejecuta beam_search_dynamic con ruido gaussiano inyectado
+    POR ARCO (eval_noise_sigma), de modo que la incertidumbre la enfrenta la
+    política en cada decisión y la dispersión resultante mide robustez real.
+
+    Reporta media, std, percentiles y CVaR_alpha (media del peor alpha-cuantil),
+    la métrica de riesgo coherente que captura el comportamiento en cola.
+    """
+    agent.eval()
     rewards   = []
     durations = []
     valid     = 0
 
-    for _ in range(n_episodes):
-        route, reward, duration = generate_optimal_route(
-            agent, start_node, time_matrix, reward_matrix_penalized, num_nodes,
-            distance_arr=distance_arr,
-            ltr_stack=ltr_stack, trucks_stack=trucks_stack, day_idx=day_idx)
-        if route is not None:
-            if STOCHASTIC_MODE and noise_sigma > 0:
-                reward = reward + np.random.normal(0, noise_sigma)
-            rewards.append(reward)
-            durations.append(duration)
-            if duration <= MAX_DURATION:
-                valid += 1
+    try:
+        for _ in range(n_episodes):
+            route, reward, duration = agent.beam_search_dynamic(
+                start_node, start_day_idx,
+                time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
+                max_duration,
+                ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+                eval_noise_sigma=eval_noise_sigma,
+            )
+            if route is not None:
+                rewards.append(reward)
+                durations.append(duration)
+                if duration <= max_duration:
+                    valid += 1
+    finally:
+        agent.train()
 
     if not rewards:
-        return {'mean_reward': -np.inf, 'std_reward': 0,
-                'median_reward': -np.inf, 'valid_fraction': 0,
-                'mean_duration': np.inf, 'n_routes': 0}
+        return {'mean_reward': -np.inf, 'std_reward': 0.0,
+                'median_reward': -np.inf, 'p10_reward': -np.inf,
+                'p90_reward': -np.inf, 'cvar_reward': -np.inf,
+                'valid_fraction': 0.0, 'mean_duration': np.inf, 'n_routes': 0}
+
+    arr = np.asarray(rewards, dtype=float)
+    # CVaR_alpha: media del peor alpha-cuantil (cola inferior de rewards).
+    k = max(1, int(np.ceil(cvar_alpha * len(arr))))
+    worst_k = np.sort(arr)[:k]
+    cvar = float(np.mean(worst_k))
 
     return {
-        'mean_reward':    np.mean(rewards),
-        'std_reward':     np.std(rewards),
-        'median_reward':  np.median(rewards),
-        'p10_reward':     np.percentile(rewards, 10),
-        'p90_reward':     np.percentile(rewards, 90),
-        'valid_fraction': valid / len(rewards),
-        'mean_duration':  np.mean(durations),
-        'n_routes':       len(rewards),
+        'mean_reward':    float(np.mean(arr)),
+        'std_reward':     float(np.std(arr)),
+        'median_reward':  float(np.median(arr)),
+        'p10_reward':     float(np.percentile(arr, 10)),
+        'p90_reward':     float(np.percentile(arr, 90)),
+        'cvar_reward':    cvar,
+        'valid_fraction': valid / len(arr),
+        'mean_duration':  float(np.mean(durations)),
+        'n_routes':       len(arr),
     }
 
 
@@ -144,6 +171,18 @@ def run_solver_comparison(agent, time_matrix,
     rng         = np.random.default_rng(SEED)
     day_indices = rng.integers(0, num_days, size=num_nodes)
 
+    # Sigma de evaluación en unidades crudas (misma escala que rm_day).
+    _stds = []
+    for _d in range(rate_stack.shape[0]):
+        _rev = (rate_stack[_d] * distance_arr).copy()
+        _rev[loads_stack[_d] <= 1] = 0
+        from config import MPG, MARGINAL_COST_SIN_DIESEL
+        _cost = distance_arr * (diesel_arr / MPG) + distance_arr * MARGINAL_COST_SIN_DIESEL
+        _stds.append(np.std((_rev - _cost).flatten()))
+    eval_noise_sigma = (EVAL_NOISE_FRACTION * float(np.mean(_stds))
+                        if STOCHASTIC_MODE else 0.0)
+    print(f"Eval noise sigma (per-arc, raw): {eval_noise_sigma:.1f}")
+
     print("\n--- Solver Comparison (eval set) ---")
     print(f"Eval days: {num_days} | absolute range: [{TRAIN_DAYS}, {TRAIN_DAYS + num_days - 1}]")
     print(f"Day assignments per node: {day_indices.tolist()}\n")
@@ -192,19 +231,23 @@ def run_solver_comparison(agent, time_matrix,
         })
 
         # DRL — Stochastic evaluation (con ruido, mide robustez bajo incertidumbre)
-        stoch = evaluate_stochastic(agent, s, time_matrix, reward_matrix_penalized,
-                                     num_nodes, noise_sigma,
-                                     distance_arr=distance_arr,
-                                     ltr_stack=ltr_stack, trucks_stack=trucks_stack,
-                                     day_idx=day_idx)
+        stoch = evaluate_stochastic(
+            agent, s, day_idx,
+            time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
+            num_nodes, eval_noise_sigma,
+            ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+        )
         row.update({
             'DRL Stoch Mean':   stoch['mean_reward'],
             'DRL Stoch Std':    stoch['std_reward'],
+            'DRL Stoch CVaR':   stoch['cvar_reward'],
+            'DRL Stoch P10':    stoch['p10_reward'],
             'DRL Stoch Valid%': stoch['valid_fraction'] * 100,
         })
         print(
             f"  DRL Det:  {drl_route} | reward {drl_reward:.1f}"
             f" | stoch mean {stoch['mean_reward']:.1f} ± {stoch['std_reward']:.1f}"
+            f" | CVaR {stoch['cvar_reward']:.1f}"
         )
         print(f"  DRL Real: {drl_real_route} | reward {drl_real_reward:.1f} (días dinámicos)")
 

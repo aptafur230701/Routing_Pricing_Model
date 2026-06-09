@@ -389,6 +389,7 @@ class AMRoutingAgent(nn.Module):
         beam_width:    int   = None,
         ltr_stack:     np.ndarray = None,   # [num_nodes, 120]
         trucks_stack:  np.ndarray = None,   # [num_nodes, 120, 3]
+        eval_noise_sigma: float = 0.0,      # ruido gaussiano por arco (0 = determinista)
     ):
         """Beam search con días de mercado dinámicos por beam.
 
@@ -398,6 +399,12 @@ class AMRoutingAgent(nn.Module):
         """
         from config import get_beam_width as _get_beam_width
         from problem_data import build_day_matrices
+
+        def _arc_reward(rm, i, j):
+            raw = float(rm.iloc[i, j])
+            if eval_noise_sigma > 0:
+                raw = raw + np.random.normal(0, eval_noise_sigma)
+            return raw
 
         if beam_width is None:
             beam_width = _get_beam_width(self.num_nodes)
@@ -491,7 +498,7 @@ class AMRoutingAgent(nn.Module):
                     if time_elapsed + step_time > max_duration + 1e-6 and next_node != start_node:
                         continue
 
-                    step_reward = float(rm_day.iloc[current_node, next_node])
+                    step_reward = _arc_reward(rm_day, current_node, next_node)
 
                     new_visited_set   = set(visited_set)
                     new_visited_inter = set(beam["visited_inter"])
@@ -527,7 +534,7 @@ class AMRoutingAgent(nn.Module):
                     float(time_matrix.iloc[cn, start_node])
                     if has_iloc_t else float(time_matrix[cn][start_node])
                 )
-                r_ret = float(rm_day.iloc[cn, start_node])
+                r_ret = _arc_reward(rm_day, cn, start_node)
                 if beam["time_elapsed"] + t_ret <= max_duration + 1e-6:
                     beam["time_elapsed"] += t_ret
                     beam["total_reward"] += r_ret

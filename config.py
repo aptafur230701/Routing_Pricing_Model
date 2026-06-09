@@ -13,8 +13,22 @@ MPG             = 6.5
 MARGINAL_COST_SIN_DIESEL = 1.73
 
 # ── Stochastic reward ────────────────────────────────────────
-STOCHASTIC_MODE  = True
-NOISE_FRACTION   = 0.10          # 10 % of reward-matrix std
+# Control de ruido gaussiano sintético, separado por fase.
+# El ruido se calibra siempre como fracción de la std intra-día de los
+# rewards (calculada sobre días de train en load_matrices).
+#
+#   TRAIN_NOISE_FRACTION : regularización durante el entrenamiento PPO.
+#                          Poner 0.0 para la ablación "sin ruido sintético"
+#                          (el agente sigue viendo variabilidad histórica de días).
+#   EVAL_NOISE_FRACTION  : magnitud del ruido inyectado paso-a-paso en la
+#                          evaluación estocástica (rollout con días dinámicos).
+STOCHASTIC_MODE       = True      # master switch; False = todo determinista
+TRAIN_NOISE_FRACTION  = 0.10      # 10 % std intra-día — regularización en training
+EVAL_NOISE_FRACTION   = 0.10      # 10 % std intra-día — estrés en evaluación
+
+# Compatibilidad hacia atrás: algunos módulos aún importan NOISE_FRACTION.
+# Se mantiene como alias del valor de entrenamiento para no romper imports.
+NOISE_FRACTION        = TRAIN_NOISE_FRACTION
 
 # ── Environment constraints ───────────────────────────────────
 DURATION_LIMIT      = 70.0
