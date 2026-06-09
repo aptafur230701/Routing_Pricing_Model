@@ -15,11 +15,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from config import (
-    STOCHASTIC_MODE, MAX_DURATION,
+    MAX_DURATION,
     REWARD_SCALE_FACTOR,
-    N_EVAL_EPISODES, NOISE_FRACTION, EVAL_NOISE_FRACTION, SEED, TRAIN_DAYS,
+    N_EVAL_EPISODES, SEED, TRAIN_DAYS,
 )
-from problem_data import sample_stochastic_reward, build_day_matrices
+from problem_data import build_day_matrices
 from Solvers import (
     solve_mip, solve_2opt_heuristic,
     solve_LNS_metaheuristic, solve_genetic_algorithm,
@@ -46,71 +46,6 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
         ltr_stack=ltr_stack, trucks_stack=trucks_stack, day_idx=day_idx,
     )
     return route, reward, duration
-
-
-# ── Stochastic evaluation ─────────────────────────────────────
-def evaluate_stochastic(agent, start_node, start_day_idx,
-                        time_matrix, rate_stack, loads_stack,
-                        distance_arr, diesel_arr,
-                        num_nodes, eval_noise_sigma,
-                        n_episodes=N_EVAL_EPISODES,
-                        max_duration=MAX_DURATION,
-                        ltr_stack=None, trucks_stack=None,
-                        cvar_alpha=0.20):
-    """Distribución de reward bajo rollouts estocásticos con días dinámicos.
-
-    Cada episodio ejecuta beam_search_dynamic con ruido gaussiano inyectado
-    POR ARCO (eval_noise_sigma), de modo que la incertidumbre la enfrenta la
-    política en cada decisión y la dispersión resultante mide robustez real.
-
-    Reporta media, std, percentiles y CVaR_alpha (media del peor alpha-cuantil),
-    la métrica de riesgo coherente que captura el comportamiento en cola.
-    """
-    agent.eval()
-    rewards   = []
-    durations = []
-    valid     = 0
-
-    try:
-        for _ in range(n_episodes):
-            route, reward, duration = agent.beam_search_dynamic(
-                start_node, start_day_idx,
-                time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
-                max_duration,
-                ltr_stack=ltr_stack, trucks_stack=trucks_stack,
-                eval_noise_sigma=eval_noise_sigma,
-            )
-            if route is not None:
-                rewards.append(reward)
-                durations.append(duration)
-                if duration <= max_duration:
-                    valid += 1
-    finally:
-        agent.train()
-
-    if not rewards:
-        return {'mean_reward': -np.inf, 'std_reward': 0.0,
-                'median_reward': -np.inf, 'p10_reward': -np.inf,
-                'p90_reward': -np.inf, 'cvar_reward': -np.inf,
-                'valid_fraction': 0.0, 'mean_duration': np.inf, 'n_routes': 0}
-
-    arr = np.asarray(rewards, dtype=float)
-    # CVaR_alpha: media del peor alpha-cuantil (cola inferior de rewards).
-    k = max(1, int(np.ceil(cvar_alpha * len(arr))))
-    worst_k = np.sort(arr)[:k]
-    cvar = float(np.mean(worst_k))
-
-    return {
-        'mean_reward':    float(np.mean(arr)),
-        'std_reward':     float(np.std(arr)),
-        'median_reward':  float(np.median(arr)),
-        'p10_reward':     float(np.percentile(arr, 10)),
-        'p90_reward':     float(np.percentile(arr, 90)),
-        'cvar_reward':    cvar,
-        'valid_fraction': valid / len(arr),
-        'mean_duration':  float(np.mean(durations)),
-        'n_routes':       len(arr),
-    }
 
 
 # ── DRL env-based rollout (Modo B) ───────────────────────────
@@ -147,7 +82,7 @@ def rollout_drl_env(
 # ── Solver comparison ─────────────────────────────────────────
 def run_solver_comparison(agent, time_matrix,
                            rate_stack, loads_stack, distance_arr, diesel_arr,
-                           noise_sigma, num_nodes,
+                           num_nodes,
                            ltr_stack=None, trucks_stack=None):
     """Run DRL + all benchmark solvers for every start node.
 
@@ -172,18 +107,6 @@ def run_solver_comparison(agent, time_matrix,
     rng         = np.random.default_rng(SEED)
     day_indices = rng.integers(0, num_days, size=num_nodes)
 
-    # Sigma de evaluación en unidades crudas (misma escala que rm_day).
-    _stds = []
-    for _d in range(rate_stack.shape[0]):
-        _rev = (rate_stack[_d] * distance_arr).copy()
-        _rev[loads_stack[_d] <= 1] = 0
-        from config import MPG, MARGINAL_COST_SIN_DIESEL
-        _cost = distance_arr * (diesel_arr / MPG) + distance_arr * MARGINAL_COST_SIN_DIESEL
-        _stds.append(np.std((_rev - _cost).flatten()))
-    eval_noise_sigma = (EVAL_NOISE_FRACTION * float(np.mean(_stds))
-                        if STOCHASTIC_MODE else 0.0)
-    print(f"Eval noise sigma (per-arc, raw): {eval_noise_sigma:.1f}")
-
     print("\n--- Solver Comparison (eval set) ---")
     print(f"Eval days: {num_days} | absolute range: [{TRAIN_DAYS}, {TRAIN_DAYS + num_days - 1}]")
     print(f"Day assignments per node: {day_indices.tolist()}\n")
@@ -197,9 +120,7 @@ def run_solver_comparison(agent, time_matrix,
         print(f"\nStart node {s} | eval day {day_idx} (abs day {abs_day_idx})")
         row = {'Start Node': s, 'Eval Day Index': day_idx, 'Abs Day Index': abs_day_idx}
 
-        # DRL — Det evaluation (sin ruido, mismas condiciones que los baselines)
-        # Se usa noise_sigma=0 implícitamente: generate_optimal_route es determinista.
-        # Esto permite un gap de calidad justo. La evaluación estocástica se reporta aparte.
+        # DRL — Det evaluation (mismas condiciones que los baselines)
         t0 = time.time()
         drl_route, drl_reward, drl_duration = generate_optimal_route(
             agent, s, time_matrix, reward_matrix_penalized, num_nodes,
@@ -231,25 +152,7 @@ def run_solver_comparison(agent, time_matrix,
             'DRL Real Valid':    drl_real_valid,
         })
 
-        # DRL — Stochastic evaluation (con ruido, mide robustez bajo incertidumbre)
-        stoch = evaluate_stochastic(
-            agent, s, day_idx,
-            time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
-            num_nodes, eval_noise_sigma,
-            ltr_stack=ltr_stack, trucks_stack=trucks_stack,
-        )
-        row.update({
-            'DRL Stoch Mean':   stoch['mean_reward'],
-            'DRL Stoch Std':    stoch['std_reward'],
-            'DRL Stoch CVaR':   stoch['cvar_reward'],
-            'DRL Stoch P10':    stoch['p10_reward'],
-            'DRL Stoch Valid%': stoch['valid_fraction'] * 100,
-        })
-        print(
-            f"  DRL Det:  {drl_route} | reward {drl_reward:.1f}"
-            f" | stoch mean {stoch['mean_reward']:.1f} ± {stoch['std_reward']:.1f}"
-            f" | CVaR {stoch['cvar_reward']:.1f}"
-        )
+        print(f"  DRL Det:  {drl_route} | reward {drl_reward:.1f}")
         print(f"  DRL Real: {drl_real_route} | reward {drl_real_reward:.1f} (días dinámicos)")
 
         # MIP
@@ -349,13 +252,12 @@ def run_solver_comparison(agent, time_matrix,
                 return ((mip_r - solver_r) / abs(mip_r)) * 100
             return float('nan')
 
-        row['DRL Gap (%)']       = gap(row['DRL Det Reward'],    row['DRL Valid'])
-        row['DRL Real Gap (%)']  = gap(row['DRL Real Reward'],  row['DRL Real Valid'])
-        row['2Opt Gap (%)']      = gap(row['2Opt Reward'],      row['2Opt Valid'])
-        row['GA Gap (%)']        = gap(row['GA Reward'],        row['GA Valid'])
-        row['LNS Gap (%)']       = gap(row['LNS Reward'],       row['LNS Valid'])
-        row['HGA-LNS Gap (%)']   = gap(row['HGA-LNS Reward'],  row['HGA-LNS Valid'])
-        row['DRL Stoch Gap (%)'] = gap(row['DRL Stoch Mean'],  row['DRL Stoch Valid%'] > 0)
+        row['DRL Gap (%)']      = gap(row['DRL Det Reward'],   row['DRL Valid'])
+        row['DRL Real Gap (%)'] = gap(row['DRL Real Reward'],  row['DRL Real Valid'])
+        row['2Opt Gap (%)']     = gap(row['2Opt Reward'],      row['2Opt Valid'])
+        row['GA Gap (%)']       = gap(row['GA Reward'],        row['GA Valid'])
+        row['LNS Gap (%)']      = gap(row['LNS Reward'],       row['LNS Valid'])
+        row['HGA-LNS Gap (%)']  = gap(row['HGA-LNS Reward'],  row['HGA-LNS Valid'])
         results.append(row)
 
     df = pd.DataFrame(results)
@@ -394,8 +296,7 @@ def plot_ppo_diagnostics(training_log: list, num_nodes: int, output_path: str):
 
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
         fig.suptitle(
-            f'PPO Internal Diagnostics — {num_nodes} nodes '
-            f'(sigma={NOISE_FRACTION*100:.0f}%)', fontsize=14
+            f'PPO Internal Diagnostics — {num_nodes} nodes', fontsize=14
         )
 
         updates = df["update"].values
@@ -438,8 +339,7 @@ def plot_diagnostics(episode_rewards, episode_losses, results_df,
     try:
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle(
-            f'Stochastic Optimised DRL — {num_nodes} nodes '
-            f'(sigma={NOISE_FRACTION*100:.0f}%)', fontsize=14)
+            f'DRL Training Diagnostics — {num_nodes} nodes', fontsize=14)
 
         window = max(1, min(100, len(episode_rewards) // 5))
 

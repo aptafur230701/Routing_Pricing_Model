@@ -41,7 +41,7 @@ import sys
 print(sys.executable)
 
 from config import (
-    SEED, DEVICE, STOCHASTIC_MODE, NOISE_FRACTION,
+    SEED, DEVICE,
     get_episodes_per_node, TRAIN_DAYS,
 )
 from problem_data import load_matrices
@@ -61,7 +61,7 @@ def set_seeds(seed: int):
 
 def _run_am(
     NUM_NODES, time_matrix, rate_stack, loads_stack,
-    distance_arr, diesel_arr, noise_sigma, cwd,
+    distance_arr, diesel_arr, cwd,
     pretrained_agent=None, pretrained_critic=None,
     ltr_stack=None, trucks_stack=None,
 ):
@@ -78,7 +78,7 @@ def _run_am(
     t0 = time.time()
     agent_am, critic, ep_rewards, ep_losses, training_log = run_am_training(
         time_matrix, rate_stack, loads_stack,
-        distance_arr, diesel_arr, noise_sigma, NUM_NODES,
+        distance_arr, diesel_arr, NUM_NODES,
         pretrained_agent=pretrained_agent,
         pretrained_critic=pretrained_critic,
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
@@ -95,7 +95,7 @@ def _run_am(
 
 def _evaluate_and_report(
     agent, NUM_NODES, time_matrix, rate_stack, loads_stack,
-    distance_arr, diesel_arr, noise_sigma, ep_rewards, ep_losses,
+    distance_arr, diesel_arr, ep_rewards, ep_losses,
     train_time, summary_rows, cwd, label,
     ltr_stack=None, trucks_stack=None,
 ):
@@ -103,7 +103,7 @@ def _evaluate_and_report(
     results_df, timing = run_solver_comparison(
         agent, time_matrix,
         rate_stack, loads_stack, distance_arr, diesel_arr,
-        noise_sigma, NUM_NODES,
+        NUM_NODES,
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
     )
 
@@ -113,10 +113,6 @@ def _evaluate_and_report(
 
     gap_data = results_df.loc[
         results_df["MIP Valid"] & results_df["DRL Valid"], "DRL Gap (%)"
-    ].dropna()
-
-    stoch_gap_data = results_df.loc[
-        results_df["MIP Valid"] & (results_df["DRL Stoch Valid%"] > 0), "DRL Stoch Gap (%)"
     ].dropna()
 
     print(f"\n{'='*60}")
@@ -135,7 +131,6 @@ def _evaluate_and_report(
     if len(gap_data) > 0:
         print(f"  DRL avg gap vs MIP: {gap_data.mean():.2f}%")
         print(f"  DRL max gap vs MIP: {gap_data.max():.2f}%")
-    print(f"  DRL avg stoch gap vs MIP: {stoch_gap_data.mean():.2f}%" if len(stoch_gap_data) > 0 else "  DRL avg stoch gap vs MIP: N/A")
 
     summary_rows.append({
         "Model":                  label,
@@ -149,12 +144,10 @@ def _evaluate_and_report(
         "RH-Greedy Avg":          avg_valid("RH-Greedy Reward", "RH-Greedy Valid"),
         "DRL Training Time":      train_time,
         "DRL Avg Gap (%)":        gap_data.mean() if len(gap_data) > 0 else float("nan"),
-        "DRL Avg Stoch Gap (%)":  stoch_gap_data.mean() if len(stoch_gap_data) > 0 else float("nan"),
     })
 
-    suffix     = f"_stochastic_sigma{NOISE_FRACTION:.0%}" if STOCHASTIC_MODE else "_deterministic"
-    excel_path = os.path.join(cwd, f"DRL_Routing_Summary{suffix}_{label}.xlsx")
-    plot_path  = os.path.join(cwd, f"DRL_Training_Diagnostics{suffix}_{label}.png")
+    excel_path = os.path.join(cwd, f"DRL_Routing_Summary_{label}.xlsx")
+    plot_path  = os.path.join(cwd, f"DRL_Training_Diagnostics_{label}.png")
 
     save_results(results_df, summary_rows, excel_path)
     plot_diagnostics(ep_rewards, ep_losses, results_df, NUM_NODES, plot_path)
@@ -183,7 +176,7 @@ def main():
     checkpoint_dir = os.path.join(cwd, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, noise_sigma, \
+    time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, \
         ltr_stack, trucks_stack = load_matrices(NUM_NODES)
 
     # ── Train / eval split (temporal — el modelo no ve los días de eval) ──────
@@ -195,18 +188,17 @@ def main():
     agent_pretrained, critic_pretrained = build_agent_for_training(checkpoint_dir, NUM_NODES)
     agent_am, ep_r, ep_l, t, training_log = _run_am(
         NUM_NODES, time_matrix, rate_train, loads_train,
-        distance_arr, diesel_arr, noise_sigma, checkpoint_dir,
+        distance_arr, diesel_arr, checkpoint_dir,
         agent_pretrained, critic_pretrained,
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
     )
     _evaluate_and_report(
         agent_am, NUM_NODES, time_matrix, rate_eval, loads_eval,
-        distance_arr, diesel_arr, noise_sigma, ep_r, ep_l, t,
+        distance_arr, diesel_arr, ep_r, ep_l, t,
         summary_rows, output_dir, label="AM",
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
     )
-    suffix = f"_stochastic_sigma{NOISE_FRACTION:.0%}" if STOCHASTIC_MODE else "_deterministic"
-    ppo_plot_path = os.path.join(output_dir, f"PPO_Diagnostics{suffix}_AM.png")
+    ppo_plot_path = os.path.join(output_dir, "PPO_Diagnostics_AM.png")
     plot_ppo_diagnostics(training_log, NUM_NODES, ppo_plot_path)
 
     print(f"\nDone! Checkpoint guardado en: checkpoints/am_checkpoint_{NUM_NODES}nodes.pt")

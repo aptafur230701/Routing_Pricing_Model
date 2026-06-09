@@ -1,15 +1,14 @@
 """
 problem_data.py
 ==============
-Data loading, matrix computation, and stochastic reward sampling.
+Data loading and matrix computation.
 
 load_matrices(num_nodes)
-    → time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, noise_sigma
+    → time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
+      ltr_stack, trucks_stack
 
 build_day_matrices(rate_day, loads_day, distance_arr, diesel_arr, num_nodes)
     → reward_matrix, reward_matrix_penalized
-
-sample_stochastic_reward(...) → float
 
 rate_stack  and loads_stack are 3-D numpy arrays shaped [num_days, num_nodes, num_nodes].
 A random day is sampled once per episode in training/tuning so the agent learns
@@ -22,21 +21,9 @@ import pandas as pd
 
 from config import (
     MPG,
-    STOCHASTIC_MODE, NOISE_FRACTION, TRAIN_NOISE_FRACTION,
     BIG_M_PENALTY, MARGINAL_COST_SIN_DIESEL,
     TRAIN_DAYS,
 )
-
-
-def sample_stochastic_reward(
-    expected_reward: float,
-    sigma:           float,
-    scale_factor:    float,
-) -> float:
-    """Return a noisy realised reward (Gaussian perturbation)."""
-    noise    = np.random.normal(0, sigma)
-    realized = expected_reward + noise
-    return realized / scale_factor
 
 
 def build_day_matrices(
@@ -95,7 +82,6 @@ def load_matrices(num_nodes: int) -> tuple:
     loads_stack   : np.ndarray    (num_days × num_nodes × num_nodes)
     distance_arr  : np.ndarray    (num_nodes × num_nodes)
     diesel_arr    : np.ndarray    (num_nodes × num_nodes)
-    noise_sigma   : float
     ltr_stack     : np.ndarray    (num_nodes × 120)
     trucks_stack  : np.ndarray    (num_nodes × 120 × 3)  — solo deltas 1,2,3
     """
@@ -133,25 +119,11 @@ def load_matrices(num_nodes: int) -> tuple:
     rate_stack  = rate_stack_raw[:num_days, :num_nodes, :num_nodes].astype(float)
     loads_stack = loads_stack_raw[:num_days, :num_nodes, :num_nodes].astype(float)
 
-    # ── Noise sigma — computed on training days only ─────────────────
     train_days = min(TRAIN_DAYS, num_days)
-    daily_stds = []
-    for d in range(train_days):
-        revenue = (rate_stack[d] * distance_arr).copy()
-        revenue[loads_stack[d] <= 1] = 0
-        cost = distance_arr * (diesel_arr / MPG) + distance_arr * MARGINAL_COST_SIN_DIESEL
-        rewards_day = (revenue - cost).flatten()
-        daily_stds.append(np.std(rewards_day))
-    reward_std  = np.mean(daily_stds)
-    noise_sigma = TRAIN_NOISE_FRACTION * reward_std if STOCHASTIC_MODE else 0.0
-
-    eval_days = num_days - train_days
+    eval_days  = num_days - train_days
     print(f"Multi-day data  : {num_days} días totales | train={train_days} | eval={eval_days}")
-    print(f"Stochastic mode : {STOCHASTIC_MODE} | "
-        f"Noise sigma: {noise_sigma:.1f} raw units "
-        f"({TRAIN_NOISE_FRACTION*100:.0f}% of intra-day std {reward_std:.1f})")
 
-    return time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, noise_sigma, \
+    return time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, \
            ltr_stack, trucks_stack
 
 

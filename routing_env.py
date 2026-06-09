@@ -25,14 +25,13 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from config import (
-    STOCHASTIC_MODE,
     MAX_DURATION,
     REWARD_SCALE_FACTOR,
     RETURN_SUCCESS_BONUS,
     TIME_VIOLATION_PENALTY,
 )
 from state_features import get_state_size, build_state
-from problem_data import sample_stochastic_reward, build_day_matrices
+from problem_data import build_day_matrices
 
 
 class RoutingEnv(gym.Env):
@@ -51,7 +50,6 @@ class RoutingEnv(gym.Env):
     loads_stack   : np.ndarray  [num_days, num_nodes, num_nodes]
     distance_arr  : np.ndarray  (num_nodes × num_nodes)
     diesel_arr    : np.ndarray  (num_nodes × num_nodes)
-    noise_sigma   : float
     num_nodes     : int
     max_duration  : float, opcional (default: MAX_DURATION)
     """
@@ -65,7 +63,6 @@ class RoutingEnv(gym.Env):
         loads_stack: np.ndarray,
         distance_arr: np.ndarray,
         diesel_arr: np.ndarray,
-        noise_sigma: float,
         num_nodes: int,
         max_duration: float = MAX_DURATION,
     ):
@@ -76,7 +73,6 @@ class RoutingEnv(gym.Env):
         self._loads_stack = loads_stack
         self._distance_arr = distance_arr
         self._diesel_arr = diesel_arr
-        self._noise_sigma = noise_sigma
         self.num_nodes = num_nodes
         self.max_duration = max_duration
 
@@ -183,13 +179,7 @@ class RoutingEnv(gym.Env):
             self._diesel_arr,
         )
         raw_reward = float(reward_matrix_penalized_step.iloc[self._current_node, next_node])
-
-        if STOCHASTIC_MODE and self._noise_sigma > 0:
-            step_reward = sample_stochastic_reward(
-                raw_reward, self._noise_sigma, REWARD_SCALE_FACTOR
-            )
-        else:
-            step_reward = float(raw_reward) / REWARD_SCALE_FACTOR
+        step_reward = float(raw_reward) / REWARD_SCALE_FACTOR
 
         terminal_reward = 0.0
         if terminated:

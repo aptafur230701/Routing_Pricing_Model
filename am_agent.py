@@ -389,7 +389,6 @@ class AMRoutingAgent(nn.Module):
         beam_width:    int   = None,
         ltr_stack:     np.ndarray = None,   # [num_nodes, 120]
         trucks_stack:  np.ndarray = None,   # [num_nodes, 120, 3]
-        eval_noise_sigma: float = 0.0,      # ruido gaussiano por arco (0 = determinista)
     ):
         """Beam search con días de mercado dinámicos por beam.
 
@@ -401,10 +400,7 @@ class AMRoutingAgent(nn.Module):
         from problem_data import build_day_matrices
 
         def _arc_reward(rm, i, j):
-            raw = float(rm.iloc[i, j])
-            if eval_noise_sigma > 0:
-                raw = raw + np.random.normal(0, eval_noise_sigma)
-            return raw
+            return float(rm.iloc[i, j])
 
         if beam_width is None:
             beam_width = _get_beam_width(self.num_nodes)

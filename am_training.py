@@ -13,7 +13,7 @@ Interfaz análoga a run_training() de training.py:
 
     agent, critic, episode_rewards, episode_losses = run_am_training(
         time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
-        noise_sigma, num_nodes
+        num_nodes
     )
 
 · Usa RoutingEnv como entorno estándar (Siguiendo practicas de API Gymnasium).
@@ -258,7 +258,6 @@ def run_am_training(
     loads_stack:  np.ndarray,
     distance_arr: np.ndarray,
     diesel_arr:   np.ndarray,
-    noise_sigma:  float,
     num_nodes:    int,
     pretrained_agent:  AMRoutingAgent = None,
     pretrained_critic: CriticHead     = None,
@@ -275,7 +274,6 @@ def run_am_training(
     loads_stack   : np.ndarray [num_days, N, N]
     distance_arr  : np.ndarray [N, N]
     diesel_arr    : np.ndarray [N, N]
-    noise_sigma   : float
     num_nodes     : int
     ltr_stack     : np.ndarray [num_nodes, 120] — LTR por hub y día
     trucks_stack  : np.ndarray [num_nodes, 120, 3] — camiones por hub, día y delta
@@ -330,7 +328,6 @@ def run_am_training(
         loads_stack=loads_stack,
         distance_arr=distance_arr,
         diesel_arr=diesel_arr,
-        noise_sigma=noise_sigma,
         num_nodes=num_nodes,
         max_duration=MAX_DURATION,
     )
