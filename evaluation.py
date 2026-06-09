@@ -21,9 +21,10 @@ from config import (
 )
 from problem_data import sample_stochastic_reward, build_day_matrices
 from Solvers import (
-    solve_mip, solve_heuristic, solve_2opt_heuristic,
+    solve_mip, solve_2opt_heuristic,
     solve_LNS_metaheuristic, solve_genetic_algorithm,
     solve_HGA_LNS_metaheuristic,
+    solve_heuristic_rolling_horizon,
 )
 
 
@@ -158,13 +159,13 @@ def run_solver_comparison(agent, time_matrix,
     """
     results           = []
     mip_times         = []
-    heuristic_times   = []
     drl_times         = []
     drl_real_times    = []
     heuristic2_times  = []
     ga_times          = []
     lns_times         = []
     hga_lns_times     = []
+    rh_greedy_times   = []
     num_days          = rate_stack.shape[0]   # tamaño del set de evaluación
 
     # Pre-generar índices con RNG propio — aislado del estado random del agente
@@ -265,18 +266,23 @@ def run_solver_comparison(agent, time_matrix,
         })
         print(f"  MIP:    {mip_route} | reward {mip_reward:.1f}")
 
-        # Greedy
+        # Greedy Rolling-Horizon — día de mercado dinámico (decide por arco con
+        # la misma información que el DRL). day_idx es el día de inicio del nodo.
         t0 = time.time()
-        heu_status, heu_route, heu_reward, heu_duration, heu_valid = solve_heuristic(
-            s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes)
-        heuristic_times.append(time.time() - t0)
+        rh_status, rh_route, rh_reward, rh_duration, rh_valid = \
+            solve_heuristic_rolling_horizon(
+                s, time_matrix, rate_stack, loads_stack,
+                distance_arr, diesel_arr, MAX_DURATION, num_nodes,
+                start_day_idx=day_idx,
+            )
+        rh_greedy_times.append(time.time() - t0)
         row.update({
-            'Heuristic Route':    heu_route,
-            'Heuristic Reward':   heu_reward if heu_valid else -np.inf,
-            'Heuristic Duration': heu_duration if heu_route else np.inf,
-            'Heuristic Valid':    heu_valid,
+            'RH-Greedy Route':    rh_route,
+            'RH-Greedy Reward':   rh_reward if rh_valid else -np.inf,
+            'RH-Greedy Duration': rh_duration if rh_route else np.inf,
+            'RH-Greedy Valid':    rh_valid,
         })
-        print(f"  Greedy: {heu_route} | reward {heu_reward:.1f}")
+        print(f"  RH-Greedy: {rh_route} | reward {rh_reward:.1f} (días dinámicos)")
 
         # 2-Opt
         t0 = time.time()
@@ -294,7 +300,8 @@ def run_solver_comparison(agent, time_matrix,
         # Genetic Algorithm
         t0 = time.time()
         ga_status, ga_route, ga_reward, ga_duration = solve_genetic_algorithm(
-            s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes)
+            s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes,
+            seed=SEED + s)
         ga_times.append(time.time() - t0)
         row.update({
             'GA Status':   ga_status,
@@ -308,7 +315,8 @@ def run_solver_comparison(agent, time_matrix,
         # LNS
         t0 = time.time()
         lns_status, lns_route, lns_reward, lns_duration = solve_LNS_metaheuristic(
-            s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes)
+            s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes,
+            seed=SEED + s)
         lns_times.append(time.time() - t0)
         row.update({
             'LNS Status':   lns_status,
@@ -322,7 +330,8 @@ def run_solver_comparison(agent, time_matrix,
         # HGA-LNS
         t0 = time.time()
         hga_status, hga_route, hga_reward, hga_duration = solve_HGA_LNS_metaheuristic(
-            s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes)
+            s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes,
+            seed=SEED + s)
         hga_lns_times.append(time.time() - t0)
         row.update({
             'HGA-LNS Status':   hga_status,
@@ -342,7 +351,6 @@ def run_solver_comparison(agent, time_matrix,
 
         row['DRL Gap (%)']       = gap(row['DRL Det Reward'],    row['DRL Valid'])
         row['DRL Real Gap (%)']  = gap(row['DRL Real Reward'],  row['DRL Real Valid'])
-        row['Heuristic Gap (%)'] = gap(row['Heuristic Reward'], row['Heuristic Valid'])
         row['2Opt Gap (%)']      = gap(row['2Opt Reward'],      row['2Opt Valid'])
         row['GA Gap (%)']        = gap(row['GA Reward'],        row['GA Valid'])
         row['LNS Gap (%)']       = gap(row['LNS Reward'],       row['LNS Valid'])
@@ -353,11 +361,12 @@ def run_solver_comparison(agent, time_matrix,
     df = pd.DataFrame(results)
 
     timing = {
-        'mip_times': mip_times, 'heuristic_times': heuristic_times,
+        'mip_times': mip_times,
         'drl_times': drl_times, 'drl_real_times': drl_real_times,
         'heuristic2_times': heuristic2_times,
         'ga_times': ga_times,   'lns_times': lns_times,
         'hga_lns_times': hga_lns_times,
+        'rh_greedy_times': rh_greedy_times,
     }
     return df, timing
 

@@ -434,7 +434,7 @@ def solve_2opt_heuristic(start_node, time_m, reward_m, max_d, num_n):
     return status, best_route, best_reward, best_time, is_valid
 
 
-def solve_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n):
+def solve_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n, seed=None):
     """
     Large Neighborhood Search (LNS) metaheuristic:
     1. Start with a greedy initial solution
@@ -442,6 +442,8 @@ def solve_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n):
     3. Accept solutions if they improve best known or pass probabilistic criterion
     Returns: status, route, total_reward, total_duration (same format as solve_mip)
     """
+    if seed is not None:
+        np.random.seed(seed)
     max_arcs = num_n - 1
 
     # --- Step 1: Generate initial solution using greedy heuristic ---
@@ -670,7 +672,7 @@ def _repair_route_lns_best_position(destroyed_route, removed_nodes, start_node, 
 
     return current_route, current_reward, current_time
 
-def solve_genetic_algorithm(start_node, time_m, reward_m, max_d, num_n):
+def solve_genetic_algorithm(start_node, time_m, reward_m, max_d, num_n, seed=None):
     """
     Hybrid Genetic Algorithm for routing:
     1. Initialize population with diverse feasible routes (max 6 nodes: 5 steps)
@@ -678,6 +680,8 @@ def solve_genetic_algorithm(start_node, time_m, reward_m, max_d, num_n):
     3. Return best solution from population
     Returns: status, route, total_reward, total_duration (same format as solve_mip)
     """
+    if seed is not None:
+        np.random.seed(seed)
     max_route_len = num_n
 
     # --- GA Parameters (scaled by problem size) ---
@@ -1026,7 +1030,7 @@ def _apply_lns_mutation(route, start_node, time_m, reward_m, max_d, destroy_size
     return repaired_route
 
 
-def solve_HGA_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n):
+def solve_HGA_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n, seed=None):
     """
     Hybrid Genetic Algorithm – Large Neighborhood Search (HGA-LNS):
     · GA drives global exploration: diverse population, tournament selection, OX crossover.
@@ -1034,6 +1038,8 @@ def solve_HGA_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n):
     · 2-opt refinement polishes each offspring's geometry after repair.
     Returns: status, route, total_reward, total_duration  (same format as solve_mip)
     """
+    if seed is not None:
+        np.random.seed(seed)
     max_route_len = num_n
 
     # --- Parameters ---
@@ -1137,3 +1143,84 @@ def solve_HGA_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n):
     )
     final_status = "Optimal" if is_valid else "Infeasible"
     return final_status, best_overall['route'], best_overall['reward'], best_overall['duration']
+
+
+def solve_heuristic_rolling_horizon(
+    start_node, time_m, rate_stack, loads_stack,
+    distance_arr, diesel_arr, max_d, num_n, start_day_idx,
+):
+    """Greedy miope con día de mercado DINÁMICO (rolling horizon).
+
+    Baseline no-aprendido honesto: ve EXACTAMENTE la misma información que la
+    política DRL (día corriente según time_elapsed), pero decide arco-a-arco sin
+    razonamiento de horizonte. Recalcula la matriz de reward del día corriente en
+    cada paso, replicando _get_current_day_idx() del entorno:
+        day_idx = min(start_day_idx + int(time_elapsed // 14), num_days - 1)
+
+    Devuelve: status, route, total_reward, total_duration, is_valid
+    (mismo formato que solve_heuristic).
+    """
+    from problem_data import build_day_matrices
+
+    num_days = rate_stack.shape[0]
+
+    def reward_matrix_for_time(t_elapsed):
+        day_idx = min(start_day_idx + int(t_elapsed // 14), num_days - 1)
+        _, rm_pen = build_day_matrices(
+            rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+        )
+        return rm_pen
+
+    current_node = start_node
+    time_elapsed = 0.0
+    total_reward = 0.0
+    route = [start_node]
+    visited = {start_node}
+    steps = 0
+    max_arcs = num_n - 1
+
+    while steps < max_arcs:
+        # Día corriente: la decisión se toma con la matriz del día actual.
+        rm = reward_matrix_for_time(time_elapsed)
+
+        best_reward = -np.inf
+        best_next_node = None
+
+        for next_node in range(num_n):
+            if next_node != current_node and next_node not in visited:
+                step_time = time_m[current_node][next_node]
+                return_time = time_m[next_node][start_node]
+                total_future_time = time_elapsed + step_time + return_time
+                if total_future_time <= max_d:
+                    step_reward = rm[current_node][next_node]
+                    return_reward = rm[next_node][start_node]
+                    total_cycle_reward = step_reward + return_reward
+                    if total_cycle_reward > best_reward:
+                        best_reward = total_cycle_reward
+                        best_next_node = next_node
+
+        if best_next_node is not None:
+            # La recompensa REALIZADA se acumula con la matriz del día en que se
+            # ejecuta el arco (mismo día con que se decidió, antes de avanzar).
+            total_reward += rm[current_node][best_next_node]
+            time_elapsed += time_m[current_node][best_next_node]
+            current_node = best_next_node
+            route.append(current_node)
+            visited.add(current_node)
+            steps += 1
+        else:
+            break
+
+    # Cerrar ciclo con la matriz del día en que se ejecuta el arco de retorno.
+    if route[-1] != start_node:
+        return_time = time_m[current_node][start_node]
+        if time_elapsed + return_time <= max_d:
+            rm_close = reward_matrix_for_time(time_elapsed)
+            total_reward += rm_close[current_node][start_node]
+            time_elapsed += return_time
+            route.append(start_node)
+
+    is_valid = (route[-1] == start_node and len(route) > 1
+                and time_elapsed <= max_d)
+    status = "Optimal" if is_valid else "Infeasible"
+    return status, route, total_reward, time_elapsed, is_valid

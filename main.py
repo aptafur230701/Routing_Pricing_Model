@@ -124,11 +124,11 @@ def _evaluate_and_report(
     print(f"{'='*60}")
     print(f"  MIP avg reward    : {avg_valid('MIP Reward',       'MIP Valid'):.1f}")
     print(f"  DRL avg reward    : {avg_valid('DRL Det Reward',    'DRL Valid'):.1f}")
-    print(f"  Greedy avg reward : {avg_valid('Heuristic Reward', 'Heuristic Valid'):.1f}")
     print(f"  2-Opt avg reward  : {avg_valid('2Opt Reward',      '2Opt Valid'):.1f}")
     print(f"  GA avg reward     : {avg_valid('GA Reward',          'GA Valid'):.1f}")
     print(f"  LNS avg reward    : {avg_valid('LNS Reward',         'LNS Valid'):.1f}")
     print(f"  HGA-LNS avg reward: {avg_valid('HGA-LNS Reward',     'HGA-LNS Valid'):.1f}")
+    print(f"  RH-Greedy avg rew : {avg_valid('RH-Greedy Reward', 'RH-Greedy Valid'):.1f}")
     print(f"  Training time     : {train_time:.1f} s")
     print(f"  DRL avg inference : {np.mean(timing['drl_times'])*1000:.1f} ms")
     print(f"  MIP avg inference : {np.mean(timing['mip_times'])*1000:.1f} ms")
@@ -142,11 +142,11 @@ def _evaluate_and_report(
         "Node Size":              NUM_NODES,
         "MIP Avg Reward":         avg_valid("MIP Reward",       "MIP Valid"),
         "DRL Avg Reward":         avg_valid("DRL Det Reward",   "DRL Valid"),
-        "Heuristic Avg":          avg_valid("Heuristic Reward", "Heuristic Valid"),
         "2Opt Avg":               avg_valid("2Opt Reward",      "2Opt Valid"),
         "GA Avg":                 avg_valid("GA Reward",        "GA Valid"),
         "LNS Avg":                avg_valid("LNS Reward",       "LNS Valid"),
         "HGA-LNS Avg":            avg_valid("HGA-LNS Reward",  "HGA-LNS Valid"),
+        "RH-Greedy Avg":          avg_valid("RH-Greedy Reward", "RH-Greedy Valid"),
         "DRL Training Time":      train_time,
         "DRL Avg Gap (%)":        gap_data.mean() if len(gap_data) > 0 else float("nan"),
         "DRL Avg Stoch Gap (%)":  stoch_gap_data.mean() if len(stoch_gap_data) > 0 else float("nan"),

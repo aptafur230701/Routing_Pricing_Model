@@ -106,7 +106,6 @@ def _evaluate_and_report(
     print(f"{'='*60}")
     print(f"  MIP avg reward    : {avg_valid('MIP Reward',       'MIP Valid'):.1f}")
     print(f"  DRL avg reward    : {avg_valid('DRL Det Reward',    'DRL Valid'):.1f}")
-    print(f"  Greedy avg reward : {avg_valid('Heuristic Reward', 'Heuristic Valid'):.1f}")
     print(f"  2-Opt avg reward  : {avg_valid('2Opt Reward',      '2Opt Valid'):.1f}")
     print(f"  GA avg reward     : {avg_valid('GA Reward',          'GA Valid'):.1f}")
     print(f"  LNS avg reward    : {avg_valid('LNS Reward',         'LNS Valid'):.1f}")
@@ -124,7 +123,6 @@ def _evaluate_and_report(
         "Node Size":              NUM_NODES,
         "MIP Avg Reward":         avg_valid("MIP Reward",       "MIP Valid"),
         "DRL Avg Reward":         avg_valid("DRL Det Reward",   "DRL Valid"),
-        "Heuristic Avg":          avg_valid("Heuristic Reward", "Heuristic Valid"),
         "2Opt Avg":               avg_valid("2Opt Reward",      "2Opt Valid"),
         "GA Avg":                 avg_valid("GA Reward",        "GA Valid"),
         "LNS Avg":                avg_valid("LNS Reward",       "LNS Valid"),

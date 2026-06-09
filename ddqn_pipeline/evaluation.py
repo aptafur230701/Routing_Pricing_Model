@@ -23,7 +23,7 @@ from config import (
 from state import build_state
 from problem_data import sample_stochastic_reward, build_day_matrices
 from Solvers import (
-    solve_mip, solve_heuristic, solve_2opt_heuristic,
+    solve_mip, solve_2opt_heuristic,
     solve_LNS_metaheuristic, solve_genetic_algorithm,
     solve_HGA_LNS_metaheuristic,
 )
@@ -183,7 +183,6 @@ def run_solver_comparison(agent, time_matrix,
     """Run DRL + all benchmark solvers for every start node."""
     results           = []
     mip_times         = []
-    heuristic_times   = []
     drl_times         = []
     heuristic2_times  = []
     ga_times          = []
@@ -234,19 +233,6 @@ def run_solver_comparison(agent, time_matrix,
             'MIP Valid':    mip_status == 'Optimal' and mip_route is not None,
         })
         print(f"  MIP:    {mip_route} | reward {mip_reward:.1f}")
-
-        # Greedy
-        t0 = time.time()
-        heu_status, heu_route, heu_reward, heu_duration, heu_valid = solve_heuristic(
-            s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes)
-        heuristic_times.append(time.time() - t0)
-        row.update({
-            'Heuristic Route':    heu_route,
-            'Heuristic Reward':   heu_reward if heu_valid else -np.inf,
-            'Heuristic Duration': heu_duration if heu_route else np.inf,
-            'Heuristic Valid':    heu_valid,
-        })
-        print(f"  Greedy: {heu_route} | reward {heu_reward:.1f}")
 
         # 2-Opt
         t0 = time.time()
@@ -312,7 +298,6 @@ def run_solver_comparison(agent, time_matrix,
 
         row['DRL Gap (%)']       = gap(row['DRL Det Reward'],   row['DRL Valid'])
         row['DRL Stoch Gap (%)'] = gap(row['DRL Stoch Mean'],   row['DRL Stoch Valid%'] > 0)
-        row['Heuristic Gap (%)'] = gap(row['Heuristic Reward'], row['Heuristic Valid'])
         row['2Opt Gap (%)']      = gap(row['2Opt Reward'],      row['2Opt Valid'])
         row['GA Gap (%)']        = gap(row['GA Reward'],        row['GA Valid'])
         row['LNS Gap (%)']       = gap(row['LNS Reward'],       row['LNS Valid'])
@@ -322,7 +307,7 @@ def run_solver_comparison(agent, time_matrix,
     df = pd.DataFrame(results)
 
     timing = {
-        'mip_times': mip_times, 'heuristic_times': heuristic_times,
+        'mip_times': mip_times,
         'drl_times': drl_times, 'heuristic2_times': heuristic2_times,
         'ga_times': ga_times,   'lns_times': lns_times,
         'hga_lns_times': hga_lns_times,
