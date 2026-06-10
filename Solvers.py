@@ -1177,7 +1177,10 @@ def build_oracle_reward_matrix(
         cost = distance_arr * (diesel_arr / MPG) + distance_arr * MARGINAL_COST_SIN_DIESEL
         reward_by_day[d] = np.round(revenue - cost, 0)
 
-    # Build oracle matrix: sorted lane availability with deterministic seeds
+    # Build oracle matrix: sorted lane availability with deterministic seeds.
+    # Arcs from/to start_node are never filtered by Bernoulli — this matches
+    # beam_search_dynamic, which skips lane filtering when current_node == start_node
+    # and never blocks the return arc (j == start_node).
     oracle_r = np.full((num_nodes, num_nodes), BIG_M_PENALTY, dtype=np.float64)
     for i in range(num_nodes):
         arrival_day_i = int(arrival_days[i])
@@ -1187,11 +1190,56 @@ def build_oracle_reward_matrix(
         for j in range(num_nodes):
             if i == j:
                 oracle_r[i, j] = BIG_M_PENALTY
+            elif i == start_node or j == start_node:
+                # Departure from start and return to start are always available
+                oracle_r[i, j] = reward_by_day[arrival_day_i][i, j]
             elif lane_exists[j] == 1:
                 oracle_r[i, j] = reward_by_day[arrival_day_i][i, j]
             # else: lane_exists[j] == 0 → stays BIG_M_PENALTY
 
     return oracle_r
+
+
+def simulate_route_reward(
+    route, start_node, start_day_idx,
+    time_matrix_np, rate_stack, loads_stack,
+    distance_arr, diesel_arr,
+):
+    """Compute the actual reward for a fixed route using sequential arrival days.
+
+    Replicates the day-index logic from beam_search_dynamic:
+        day_idx = min(start_day_idx + int(time_elapsed // 14), max_day)
+    so each arc uses the real market day at the time it is executed, not the
+    Dijkstra-based estimate used inside build_oracle_reward_matrix.
+    """
+    from problem_data import build_day_matrices
+
+    if route is None or len(route) < 2:
+        return -np.inf, np.inf
+
+    max_day = rate_stack.shape[0] - 1
+    day_cache = {}
+
+    def _get_rm(day_idx):
+        if day_idx not in day_cache:
+            _, rm = build_day_matrices(
+                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+            )
+            day_cache[day_idx] = rm
+        return day_cache[day_idx]
+
+    time_elapsed = 0.0
+    total_reward = 0.0
+
+    for step in range(len(route) - 1):
+        i = route[step]
+        j = route[step + 1]
+        day_idx = min(start_day_idx + int(time_elapsed // 14), max_day)
+        rm = _get_rm(day_idx)
+        total_reward += float(rm.iloc[i, j])
+        time_elapsed += float(time_matrix_np[i][j])
+
+    return total_reward, time_elapsed
 
 
 def solve_mip_oracle(
@@ -1283,6 +1331,14 @@ def solve_mip_oracle(
                 total_reward = -np.inf
                 total_duration = np.inf
                 status = 'Error_In_Route'
+            else:
+                # Replace MIP objective (Dijkstra-day estimates) with the reward
+                # computed by walking the route with actual sequential arrival days,
+                # matching the evaluation used by DRL Real and RH-Greedy.
+                total_reward, total_duration = simulate_route_reward(
+                    route, start_node, start_day_idx,
+                    time_matrix_np, rate_stack, loads_stack, distance_arr, diesel_arr,
+                )
 
         except Exception as e:
             print(f"Exception during MIP-Oracle route reconstruction for start {start_node}: {e}")
