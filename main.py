@@ -113,10 +113,6 @@ def _evaluate_and_report(
         mask = results_df[valid_col]
         return results_df.loc[mask, col].mean() if mask.any() else float("nan")
 
-    gap_data = results_df.loc[
-        results_df["MIP Valid"] & results_df["DRL Valid"], "DRL Gap (%)"
-    ].dropna()
-
     drl_real_gap_oracle = results_df.loc[
         results_df["Oracle Valid"] & results_df["DRL Real Valid"],
         "Oracle Gap vs DRL Real (%)"
@@ -126,20 +122,12 @@ def _evaluate_and_report(
     print(f"  SUMMARY — {NUM_NODES} nodes  [{label}]")
     print(f"{'='*60}")
     print(f"  MIP-Oracle avg reward  : {avg_valid('Oracle Reward',    'Oracle Valid'):.1f}")
-    print(f"  MIP avg reward         : {avg_valid('MIP Reward',       'MIP Valid'):.1f}")
     print(f"  DRL Real avg reward    : {avg_valid('DRL Real Reward',  'DRL Real Valid'):.1f}")
-    print(f"  DRL Det avg reward     : {avg_valid('DRL Det Reward',   'DRL Valid'):.1f}")
-    print(f"  2-Opt avg reward       : {avg_valid('2Opt Reward',      '2Opt Valid'):.1f}")
-    print(f"  GA avg reward          : {avg_valid('GA Reward',        'GA Valid'):.1f}")
-    print(f"  LNS avg reward         : {avg_valid('LNS Reward',       'LNS Valid'):.1f}")
     print(f"  HGA-LNS avg reward     : {avg_valid('HGA-LNS Reward',   'HGA-LNS Valid'):.1f}")
     print(f"  RH-Greedy avg reward   : {avg_valid('RH-Greedy Reward', 'RH-Greedy Valid'):.1f}")
     print(f"  Training time          : {train_time:.1f} s")
-    print(f"  DRL avg inference      : {np.mean(timing['drl_times'])*1000:.1f} ms")
-    print(f"  MIP avg inference      : {np.mean(timing['mip_times'])*1000:.1f} ms")
-    if len(gap_data) > 0:
-        print(f"  DRL Det avg gap vs MIP : {gap_data.mean():.2f}%")
-        print(f"  DRL Det max gap vs MIP : {gap_data.max():.2f}%")
+    print(f"  DRL Real avg inference : {np.mean(timing['drl_real_times'])*1000:.1f} ms")
+    print(f"  Oracle avg inference   : {np.mean(timing['oracle_times'])*1000:.1f} ms")
     if len(drl_real_gap_oracle) > 0:
         print(f"  DRL Real avg gap vs Oracle: {drl_real_gap_oracle.mean():.2f}%")
         print(f"  DRL Real max gap vs Oracle: {drl_real_gap_oracle.max():.2f}%")
@@ -148,16 +136,10 @@ def _evaluate_and_report(
         "Model":                          label,
         "Node Size":                      NUM_NODES,
         "Oracle Avg Reward":              avg_valid("Oracle Reward",    "Oracle Valid"),
-        "MIP Avg Reward":                 avg_valid("MIP Reward",       "MIP Valid"),
         "DRL Real Avg Reward":            avg_valid("DRL Real Reward",  "DRL Real Valid"),
-        "DRL Det Avg Reward":             avg_valid("DRL Det Reward",   "DRL Valid"),
-        "2Opt Avg":                       avg_valid("2Opt Reward",      "2Opt Valid"),
-        "GA Avg":                         avg_valid("GA Reward",        "GA Valid"),
-        "LNS Avg":                        avg_valid("LNS Reward",       "LNS Valid"),
         "HGA-LNS Avg":                    avg_valid("HGA-LNS Reward",  "HGA-LNS Valid"),
         "RH-Greedy Avg":                  avg_valid("RH-Greedy Reward", "RH-Greedy Valid"),
         "DRL Training Time":              train_time,
-        "DRL Det Avg Gap vs MIP (%)":     gap_data.mean() if len(gap_data) > 0 else float("nan"),
         "DRL Real Avg Gap vs Oracle (%)": drl_real_gap_oracle.mean() if len(drl_real_gap_oracle) > 0 else float("nan"),
         "DRL Real Max Gap vs Oracle (%)": drl_real_gap_oracle.max()  if len(drl_real_gap_oracle) > 0 else float("nan"),
     })
