@@ -46,8 +46,8 @@ def load_agent(checkpoint_path: str) -> AMRoutingAgent:
 
 def load_latest_day():
     """Carga las matrices y toma el último día disponible como snapshot actual."""
-    time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, _ = \
-        load_matrices(NUM_NODES)
+    time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, \
+        _, _, _ = load_matrices(NUM_NODES)
 
     # Último día del stack histórico = día más reciente disponible
     _, reward_matrix_penalized = build_day_matrices(

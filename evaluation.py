@@ -32,7 +32,8 @@ from Solvers import (
 def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penalized,
                             num_nodes, max_duration=MAX_DURATION,
                             distance_arr=None,
-                            ltr_stack=None, trucks_stack=None, day_idx=0):
+                            ltr_stack=None, trucks_stack=None, day_idx=0,
+                            avail_prob_arr=None):
     """Greedy rollout with the trained AMRoutingAgent (no grad).
 
     Delegates to agent.generate_route() without explicit beam_width —
@@ -44,6 +45,7 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
         start_node, reward_matrix_penalized, time_matrix,
         distance_arr, max_duration,
         ltr_stack=ltr_stack, trucks_stack=trucks_stack, day_idx=day_idx,
+        avail_prob_arr=avail_prob_arr,
     )
     return route, reward, duration
 
@@ -51,16 +53,17 @@ def generate_optimal_route(agent, start_node, time_matrix, reward_matrix_penaliz
 # ── DRL env-based rollout (Modo B) ───────────────────────────
 def rollout_drl_env(
     agent,
-    start_node:    int,
-    start_day_idx: int,
+    start_node:     int,
+    start_day_idx:  int,
     time_matrix,
-    rate_stack:    np.ndarray,
-    loads_stack:   np.ndarray,
-    distance_arr:  np.ndarray,
-    diesel_arr:    np.ndarray,
-    max_duration:  float      = MAX_DURATION,
-    ltr_stack:     np.ndarray = None,
-    trucks_stack:  np.ndarray = None,
+    rate_stack:     np.ndarray,
+    loads_stack:    np.ndarray,
+    distance_arr:   np.ndarray,
+    diesel_arr:     np.ndarray,
+    max_duration:   float      = MAX_DURATION,
+    ltr_stack:      np.ndarray = None,
+    trucks_stack:   np.ndarray = None,
+    avail_prob_arr: np.ndarray = None,
 ) -> tuple:
     """Beam search con días de mercado dinámicos.
 
@@ -74,6 +77,7 @@ def rollout_drl_env(
             time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
             max_duration,
             ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+            avail_prob_arr=avail_prob_arr,
         )
     finally:
         agent.train()
@@ -83,7 +87,7 @@ def rollout_drl_env(
 def run_solver_comparison(agent, time_matrix,
                            rate_stack, loads_stack, distance_arr, diesel_arr,
                            num_nodes,
-                           ltr_stack=None, trucks_stack=None):
+                           ltr_stack=None, trucks_stack=None, avail_prob_arr=None):
     """Run DRL + all benchmark solvers for every start node.
 
     Para cada nodo de inicio se usa un día del set de evaluación (días
@@ -125,7 +129,8 @@ def run_solver_comparison(agent, time_matrix,
         drl_route, drl_reward, drl_duration = generate_optimal_route(
             agent, s, time_matrix, reward_matrix_penalized, num_nodes,
             distance_arr=distance_arr,
-            ltr_stack=ltr_stack, trucks_stack=trucks_stack, day_idx=day_idx)
+            ltr_stack=ltr_stack, trucks_stack=trucks_stack, day_idx=day_idx,
+            avail_prob_arr=avail_prob_arr)
         drl_times.append(time.time() - t0)
         row.update({
             'DRL Route':      drl_route,
@@ -142,6 +147,7 @@ def run_solver_comparison(agent, time_matrix,
             agent, s, day_idx,
             time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
             ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+            avail_prob_arr=avail_prob_arr,
         )
         drl_real_times.append(time.time() - t0)
         drl_real_valid = drl_real_route is not None

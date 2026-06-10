@@ -55,7 +55,7 @@ class RolloutBuffer:
     """
 
     def __init__(self):
-        self.node_feats    = []   # list of np.ndarray (N, 6)
+        self.node_feats    = []   # list of np.ndarray (N, N_NODE_FEATURES)
         self.temporal_feats = []  # list of np.ndarray (3,)
         self.market_feats  = []   # list of np.ndarray (1,)
         self.current_nodes = []   # list of int
@@ -254,29 +254,31 @@ def _forward(
 
 def run_am_training(
     time_matrix,
-    rate_stack:   np.ndarray,
-    loads_stack:  np.ndarray,
-    distance_arr: np.ndarray,
-    diesel_arr:   np.ndarray,
-    num_nodes:    int,
+    rate_stack:     np.ndarray,
+    loads_stack:    np.ndarray,
+    distance_arr:   np.ndarray,
+    diesel_arr:     np.ndarray,
+    num_nodes:      int,
     pretrained_agent:  AMRoutingAgent = None,
     pretrained_critic: CriticHead     = None,
-    ltr_stack:    np.ndarray = None,   # [num_nodes, 120]
-    trucks_stack: np.ndarray = None,   # [num_nodes, 120, 3]
+    ltr_stack:      np.ndarray = None,   # [num_nodes, 120]
+    trucks_stack:   np.ndarray = None,   # [num_nodes, 120, 3]
+    avail_prob_arr: np.ndarray = None,   # [num_nodes, num_nodes]
 ) -> tuple:
     """
     Entrena AMRoutingAgent + CriticHead con PPO.
 
     Parámetros
     ----------
-    time_matrix   : pd.DataFrame — tiempos entre nodos.
-    rate_stack    : np.ndarray [num_days, N, N]
-    loads_stack   : np.ndarray [num_days, N, N]
-    distance_arr  : np.ndarray [N, N]
-    diesel_arr    : np.ndarray [N, N]
-    num_nodes     : int
-    ltr_stack     : np.ndarray [num_nodes, 120] — LTR por hub y día
-    trucks_stack  : np.ndarray [num_nodes, 120, 3] — camiones por hub, día y delta
+    time_matrix    : pd.DataFrame — tiempos entre nodos.
+    rate_stack     : np.ndarray [num_days, N, N]
+    loads_stack    : np.ndarray [num_days, N, N]
+    distance_arr   : np.ndarray [N, N]
+    diesel_arr     : np.ndarray [N, N]
+    num_nodes      : int
+    ltr_stack      : np.ndarray [num_nodes, 120] — LTR por hub y día
+    trucks_stack   : np.ndarray [num_nodes, 120, 3] — camiones por hub, día y delta
+    avail_prob_arr : np.ndarray [num_nodes, num_nodes] — prior Bernoulli de disponibilidad
 
     Retorna
     -------
@@ -328,6 +330,7 @@ def run_am_training(
         loads_stack=loads_stack,
         distance_arr=distance_arr,
         diesel_arr=diesel_arr,
+        avail_prob_arr=avail_prob_arr,
         num_nodes=num_nodes,
         max_duration=MAX_DURATION,
     )
@@ -385,6 +388,12 @@ def run_am_training(
                     current_day = env.current_day_idx
                     rm_pen = get_rm_pen(current_day)
 
+                    import torch as _torch
+                    _mask_t = _torch.tensor(mask, dtype=_torch.bool)
+                    if _mask_t.all():
+                        raise RuntimeError(f"Máscara completamente bloqueada en step={step}, node={env.current_node}, visited={env.visited_set}")
+
+
                     action, log_prob, _, value, nf, tf, mf = agent.act_with_value(
                         critic,
                         env.current_node, env.start_node, env.visited_set,
@@ -394,6 +403,7 @@ def run_am_training(
                         action_mask=mask,
                         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
                         day_idx=current_day,
+                        avail_prob_arr=avail_prob_arr,
                     )
 
                     next_obs, reward, terminated, truncated, info = env.step(action)
@@ -416,6 +426,7 @@ def run_am_training(
                             MAX_DURATION,
                             ltr_stack=ltr_stack, trucks_stack=trucks_stack,
                             day_idx=current_day_trunc,
+                            avail_prob_arr=avail_prob_arr,
                         )
 
                     buffer.add(

@@ -63,7 +63,7 @@ def _run_am(
     NUM_NODES, time_matrix, rate_stack, loads_stack,
     distance_arr, diesel_arr, cwd,
     pretrained_agent=None, pretrained_critic=None,
-    ltr_stack=None, trucks_stack=None,
+    ltr_stack=None, trucks_stack=None, avail_prob_arr=None,
 ):
     """Pipeline AM: entrenamiento PPO → checkpoint."""
     from am_training import run_am_training
@@ -82,6 +82,7 @@ def _run_am(
         pretrained_agent=pretrained_agent,
         pretrained_critic=pretrained_critic,
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+        avail_prob_arr=avail_prob_arr,
     )
     train_time = time.time() - t0
     print(f"Training time: {train_time:.1f} s")
@@ -97,7 +98,7 @@ def _evaluate_and_report(
     agent, NUM_NODES, time_matrix, rate_stack, loads_stack,
     distance_arr, diesel_arr, ep_rewards, ep_losses,
     train_time, summary_rows, cwd, label,
-    ltr_stack=None, trucks_stack=None,
+    ltr_stack=None, trucks_stack=None, avail_prob_arr=None,
 ):
     """Comparación de solvers + resumen + guardado de archivos."""
     results_df, timing = run_solver_comparison(
@@ -105,6 +106,7 @@ def _evaluate_and_report(
         rate_stack, loads_stack, distance_arr, diesel_arr,
         NUM_NODES,
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+        avail_prob_arr=avail_prob_arr,
     )
 
     def avg_valid(col, valid_col):
@@ -177,7 +179,7 @@ def main():
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, \
-        ltr_stack, trucks_stack = load_matrices(NUM_NODES)
+        ltr_stack, trucks_stack, avail_prob_arr = load_matrices(NUM_NODES)
 
     # ── Train / eval split (temporal — el modelo no ve los días de eval) ──────
     rate_train  = rate_stack[:TRAIN_DAYS]
@@ -191,12 +193,14 @@ def main():
         distance_arr, diesel_arr, checkpoint_dir,
         agent_pretrained, critic_pretrained,
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+        avail_prob_arr=avail_prob_arr,
     )
     _evaluate_and_report(
         agent_am, NUM_NODES, time_matrix, rate_eval, loads_eval,
         distance_arr, diesel_arr, ep_r, ep_l, t,
         summary_rows, output_dir, label="AM",
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+        avail_prob_arr=avail_prob_arr,
     )
     ppo_plot_path = os.path.join(output_dir, "PPO_Diagnostics_AM.png")
     plot_ppo_diagnostics(training_log, NUM_NODES, ppo_plot_path)

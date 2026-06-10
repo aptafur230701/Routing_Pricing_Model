@@ -5,7 +5,7 @@ Data loading and matrix computation.
 
 load_matrices(num_nodes)
     → time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
-      ltr_stack, trucks_stack
+      ltr_stack, trucks_stack, avail_prob_arr
 
 build_day_matrices(rate_day, loads_day, distance_arr, diesel_arr, num_nodes)
     → reward_matrix, reward_matrix_penalized
@@ -61,6 +61,37 @@ def build_day_matrices(
     return reward_matrix, reward_matrix_penalized
 
 
+def draw_lane_availability(
+    start_day_idx:  int,
+    node:           int,
+    arrival_day:    int,
+    avail_prob_arr: np.ndarray,
+    num_nodes:      int,
+) -> np.ndarray:
+    """Bernoulli draw for outgoing lanes FROM node, using a seed tied to the
+    world state (start_day_idx, node, arrival_day) — NOT to the agent step count.
+
+    Two routes arriving at the same node on the same calendar day always see
+    the same lane realisation, so DRL and every baseline compete on identical
+    stochastic conditions.
+
+    Parameters
+    ----------
+    start_day_idx  : episode start day index.
+    node           : node at which the truck just arrived.
+    arrival_day    : min(start_day_idx + int(time_elapsed // 14), max_day).
+    avail_prob_arr : [num_nodes, num_nodes] float32 — historical availability probs.
+    num_nodes      : number of nodes in the graph.
+
+    Returns
+    -------
+    np.ndarray of shape (num_nodes,) int8 — 1 = lane exists, 0 = lane absent.
+    """
+    seed = int((start_day_idx * 9973 + node * 97 + arrival_day) & 0xFFFFFFFF)
+    rng  = np.random.default_rng(seed)
+    return (rng.random(num_nodes) < avail_prob_arr[node]).astype(np.int8)
+
+
 def load_matrices(num_nodes: int) -> tuple:
     """Load data files and return multi-day stacks for rate/loads.
 
@@ -77,13 +108,15 @@ def load_matrices(num_nodes: int) -> tuple:
 
     Returns
     -------
-    time_matrix   : pd.DataFrame  (num_nodes × num_nodes)
-    rate_stack    : np.ndarray    (num_days × num_nodes × num_nodes)
-    loads_stack   : np.ndarray    (num_days × num_nodes × num_nodes)
-    distance_arr  : np.ndarray    (num_nodes × num_nodes)
-    diesel_arr    : np.ndarray    (num_nodes × num_nodes)
-    ltr_stack     : np.ndarray    (num_nodes × 120)
-    trucks_stack  : np.ndarray    (num_nodes × 120 × 3)  — solo deltas 1,2,3
+    time_matrix    : pd.DataFrame  (num_nodes × num_nodes)
+    rate_stack     : np.ndarray    (num_days × num_nodes × num_nodes)
+    loads_stack    : np.ndarray    (num_days × num_nodes × num_nodes)
+    distance_arr   : np.ndarray    (num_nodes × num_nodes)
+    diesel_arr     : np.ndarray    (num_nodes × num_nodes)
+    ltr_stack      : np.ndarray    (num_nodes × 120)
+    trucks_stack   : np.ndarray    (num_nodes × 120 × 3)  — solo deltas 1,2,3
+    avail_prob_arr : np.ndarray    (num_nodes × num_nodes) float32
+                     mean over train days of (loads > 0); prior Bernoulli per arc.
     """
     cwd = os.path.dirname(os.path.abspath(__file__))
 
@@ -119,12 +152,17 @@ def load_matrices(num_nodes: int) -> tuple:
     rate_stack  = rate_stack_raw[:num_days, :num_nodes, :num_nodes].astype(float)
     loads_stack = loads_stack_raw[:num_days, :num_nodes, :num_nodes].astype(float)
 
+    # ── Availability prior: P(lane i→j exists on a given day) ────────────────
+    # Computed over the full historical window (train + eval) so the prior is
+    # the same regardless of how many days are split off for training.
+    avail_prob_arr = (loads_stack > 0).mean(axis=0).astype(np.float32)
+
     train_days = min(TRAIN_DAYS, num_days)
     eval_days  = num_days - train_days
     print(f"Multi-day data  : {num_days} días totales | train={train_days} | eval={eval_days}")
 
     return time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, \
-           ltr_stack, trucks_stack
+           ltr_stack, trucks_stack, avail_prob_arr
 
 
 

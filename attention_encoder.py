@@ -23,6 +23,8 @@ Features por nodo j (desde la posición actual del camión):
   [2] dist_norm     — distancia actual→j, normalizada por máximo
   [3] is_depot      — 1.0 si j es el nodo de inicio del episodio, 0.0 si no
   [4] visited       — 1.0 si j ya fue visitado en el episodio, 0.0 si no
+  [5] trucks_norm   — camiones disponibles en j para el delta correspondiente
+  [6] avail_prior   — P(lane actual→j existe) según historial; prior del Bernoulli
 
 Compatibilidad:
   · Sin dependencias de agent.py, training.py, routing_env.py ni evaluation.py.
@@ -39,7 +41,7 @@ import torch.nn.functional as F
 from config import LTR_CLIP, TRUCKS_CLIP
 
 # Número de features por nodo — debe coincidir con build_node_features()
-N_NODE_FEATURES = 6
+N_NODE_FEATURES = 7
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -57,12 +59,13 @@ def build_node_features(
     max_duration:           float,
     trucks_stack:           np.ndarray = None,  # (N, 3) — camiones por nodo×delta para el día actual
     time_matrix_arr:        np.ndarray = None,  # (N, N) numpy — para cálculo de delta_idx
+    avail_prob_arr:         np.ndarray = None,  # (N, N) — prior Bernoulli por arco
 ) -> np.ndarray:
     """
     Construye la matriz de features de nodos para el encoder.
 
     Cada fila j contiene las features del nodo j vistas desde current_node:
-      [reward_norm, time_norm, dist_norm, is_depot, visited, trucks_norm]
+      [reward_norm, time_norm, dist_norm, is_depot, visited, trucks_norm, avail_prior]
 
     La diagonal de reward_matrix_penalized tiene BIG_M_PENALTY (-1e9).
     Se recorta a [-1e4, 1e4] antes de normalizar para evitar desbordamientos.
@@ -79,6 +82,8 @@ def build_node_features(
     max_duration             : límite temporal del episodio (horas).
     trucks_stack             : camiones por (nodo, delta) para el día actual — shape (N, 3).
     time_matrix_arr          : time_matrix como numpy array para cálculo de delta_idx.
+    avail_prob_arr           : prior Bernoulli por arco — shape (N, N); feature [6] =
+                               avail_prob_arr[current_node, j], ya en [0,1].
 
     Retorna
     -------
@@ -107,6 +112,9 @@ def build_node_features(
             delta_idx = max(0, min(2, math.ceil(travel_hours / 14.0) - 1))
             trucks_val = float(trucks_stack[j, delta_idx])
             feats[j, 5] = min(trucks_val, TRUCKS_CLIP) / TRUCKS_CLIP
+
+        if avail_prob_arr is not None:
+            feats[j, 6] = float(avail_prob_arr[current_node, j])
 
     # Recortar reward para evitar BIG_M_PENALTY (-1e9) en la diagonal
     feats[:, 0] = np.clip(feats[:, 0], -1e4, 1e4)
@@ -237,7 +245,7 @@ class AttentionEncoder(nn.Module):
 
     Parámetros
     ----------
-    d_input  : int — features por nodo (N_NODE_FEATURES = 5).
+    d_input  : int — features por nodo (N_NODE_FEATURES = 7).
     d_h      : int — dimensión del embedding (ej. 128).
     n_heads  : int — cabezas de atención (ej. 8, debe dividir d_h).
     n_layers : int — capas del encoder (ej. 3).
