@@ -25,6 +25,7 @@ from Solvers import (
     solve_LNS_metaheuristic, solve_genetic_algorithm,
     solve_HGA_LNS_metaheuristic,
     solve_heuristic_rolling_horizon,
+    solve_mip_oracle,
 )
 
 
@@ -105,6 +106,7 @@ def run_solver_comparison(agent, time_matrix,
     lns_times         = []
     hga_lns_times     = []
     rh_greedy_times   = []
+    oracle_times      = []
     num_days          = rate_stack.shape[0]   # tamaño del set de evaluación
 
     # Pre-generar índices con RNG propio — aislado del estado random del agente
@@ -193,6 +195,32 @@ def run_solver_comparison(agent, time_matrix,
         })
         print(f"  RH-Greedy: {rh_route} | reward {rh_reward:.1f} (días dinámicos)")
 
+        # MIP-Oráculo Dinámico — techo de información perfecta
+        t0 = time.time()
+        oracle_status, oracle_route, oracle_reward, oracle_duration = solve_mip_oracle(
+            start_node     = s,
+            time_matrix_np = np.array(time_matrix, dtype=float),
+            rate_stack     = rate_stack,
+            loads_stack    = loads_stack,
+            distance_arr   = distance_arr,
+            diesel_arr     = diesel_arr,
+            max_d          = MAX_DURATION,
+            num_n          = num_nodes,
+            start_day_idx  = day_idx,
+            avail_prob_arr = avail_prob_arr,
+        )
+        oracle_times.append(time.time() - t0)
+        oracle_valid = (oracle_route is not None and len(oracle_route) > 1
+                        and oracle_route[0] == oracle_route[-1])
+        row.update({
+            'Oracle Status':   oracle_status,
+            'Oracle Route':    oracle_route,
+            'Oracle Reward':   oracle_reward   if oracle_valid else -np.inf,
+            'Oracle Duration': oracle_duration if oracle_valid else np.inf,
+            'Oracle Valid':    oracle_valid,
+        })
+        print(f"  MIP-Oracle: {oracle_route} | reward {oracle_reward:.1f} (días dinámicos + Bernoulli)")
+
         # 2-Opt
         t0 = time.time()
         opt_status, opt_route, opt_reward, opt_duration, opt_valid = solve_2opt_heuristic(
@@ -264,6 +292,16 @@ def run_solver_comparison(agent, time_matrix,
         row['GA Gap (%)']       = gap(row['GA Reward'],        row['GA Valid'])
         row['LNS Gap (%)']      = gap(row['LNS Reward'],       row['LNS Valid'])
         row['HGA-LNS Gap (%)']  = gap(row['HGA-LNS Reward'],  row['HGA-LNS Valid'])
+
+        # Gaps vs Oráculo — métrica central de tesis
+        def oracle_gap(solver_r, solver_valid):
+            if oracle_valid and solver_valid and abs(oracle_reward) > 1e-6:
+                return ((oracle_reward - solver_r) / abs(oracle_reward)) * 100
+            return float('nan')
+
+        row['Oracle Gap vs DRL Real (%)']  = oracle_gap(row['DRL Real Reward'],  row['DRL Real Valid'])
+        row['Oracle Gap vs RH-Greedy (%)'] = oracle_gap(row['RH-Greedy Reward'], row['RH-Greedy Valid'])
+        row['Oracle Gap vs MIP Static (%)']= oracle_gap(row['MIP Reward'],       row['MIP Valid'])
         results.append(row)
 
     df = pd.DataFrame(results)
@@ -275,6 +313,7 @@ def run_solver_comparison(agent, time_matrix,
         'ga_times': ga_times,   'lns_times': lns_times,
         'hga_lns_times': hga_lns_times,
         'rh_greedy_times': rh_greedy_times,
+        'oracle_times': oracle_times,
     }
     return df, timing
 

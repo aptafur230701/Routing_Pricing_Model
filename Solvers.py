@@ -1145,6 +1145,161 @@ def solve_HGA_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n, seed
     return final_status, best_overall['route'], best_overall['reward'], best_overall['duration']
 
 
+def build_oracle_reward_matrix(
+    start_node, time_matrix_np, rate_stack, loads_stack,
+    distance_arr, diesel_arr, start_day_idx, avail_prob_arr,
+    num_nodes, max_day,
+):
+    """Oracle reward matrix with perfect information: correct arrival day per node
+    and exact Bernoulli lane realizations using the same deterministic seed as
+    draw_lane_availability in problem_data.py."""
+    from scipy.sparse.csgraph import shortest_path
+    from scipy.sparse import csr_matrix
+    from config import MPG, MARGINAL_COST_SIN_DIESEL, BIG_M_PENALTY
+
+    # Dijkstra: minimum travel time from start_node to every other node
+    sparse_tm = csr_matrix(time_matrix_np)
+    dist_matrix = shortest_path(sparse_tm, method='D', directed=True, indices=start_node)
+    t_shortest = dist_matrix  # shape (N,)
+
+    # Arrival day per node
+    arrival_days = np.array([
+        min(start_day_idx + int(t_shortest[i] // 14), max_day)
+        for i in range(num_nodes)
+    ], dtype=np.int32)
+
+    # Pre-build reward arrays grouped by unique arrival day
+    unique_days = np.unique(arrival_days)
+    reward_by_day = {}
+    for d in unique_days:
+        revenue = (rate_stack[d] * distance_arr).copy()
+        revenue[loads_stack[d] <= 1] = 0
+        cost = distance_arr * (diesel_arr / MPG) + distance_arr * MARGINAL_COST_SIN_DIESEL
+        reward_by_day[d] = np.round(revenue - cost, 0)
+
+    # Build oracle matrix: sorted lane availability with deterministic seeds
+    oracle_r = np.full((num_nodes, num_nodes), BIG_M_PENALTY, dtype=np.float64)
+    for i in range(num_nodes):
+        arrival_day_i = int(arrival_days[i])
+        seed = int((start_day_idx * 9973 + i * 97 + arrival_day_i) & 0xFFFFFFFF)
+        rng = np.random.default_rng(seed)
+        lane_exists = (rng.random(num_nodes) < avail_prob_arr[i]).astype(np.int8)
+        for j in range(num_nodes):
+            if i == j:
+                oracle_r[i, j] = BIG_M_PENALTY
+            elif lane_exists[j] == 1:
+                oracle_r[i, j] = reward_by_day[arrival_day_i][i, j]
+            # else: lane_exists[j] == 0 → stays BIG_M_PENALTY
+
+    return oracle_r
+
+
+def solve_mip_oracle(
+    start_node, time_matrix_np, rate_stack, loads_stack,
+    distance_arr, diesel_arr, max_d, num_n, start_day_idx, avail_prob_arr,
+):
+    """MIP with perfect-information oracle reward matrix (dynamic days + Bernoulli)."""
+    oracle_r = build_oracle_reward_matrix(
+        start_node=start_node,
+        time_matrix_np=time_matrix_np,
+        rate_stack=rate_stack,
+        loads_stack=loads_stack,
+        distance_arr=distance_arr,
+        diesel_arr=diesel_arr,
+        start_day_idx=start_day_idx,
+        avail_prob_arr=avail_prob_arr,
+        num_nodes=num_n,
+        max_day=rate_stack.shape[0] - 1,
+    )
+
+    nodes = list(range(num_n))
+    other_nodes = [n for n in nodes if n != start_node]
+
+    prob = pulp.LpProblem(f"VRP_Oracle_{start_node}", pulp.LpMaximize)
+
+    x = pulp.LpVariable.dicts("Route", (nodes, nodes), 0, 1, pulp.LpBinary)
+    u = pulp.LpVariable.dicts("MTZ",   nodes, 1, num_n - 1, pulp.LpContinuous)
+
+    prob += pulp.lpSum(oracle_r[i][j] * x[i][j] for i in nodes for j in nodes if i != j)
+
+    for k in nodes:
+        prob += pulp.lpSum(x[k][j] for j in nodes if k != j) == pulp.lpSum(x[j][k] for j in nodes if k != j)
+        if k == start_node:
+            prob += pulp.lpSum(x[start_node][j] for j in nodes if j != start_node) == 1
+            prob += pulp.lpSum(x[j][start_node] for j in nodes if j != start_node) == 1
+        else:
+            prob += pulp.lpSum(x[j][k] for j in nodes if j != k) <= 1
+
+    # Duration uses real travel times, not oracle_r
+    total_time = pulp.lpSum(time_matrix_np[i][j] * x[i][j] for i in nodes for j in nodes if i != j)
+    prob += total_time <= max_d
+
+    for i in other_nodes:
+        prob += u[i] >= 1
+        for j in other_nodes:
+            if i != j:
+                prob += u[i] - u[j] + 1 <= (num_n - 1) * (1 - x[i][j])
+
+    solver = pulp.PULP_CBC_CMD(msg=0)
+    prob.solve(solver)
+
+    status = pulp.LpStatus[prob.status]
+    route = None
+    total_reward = -np.inf
+    total_duration = np.inf
+
+    if status == 'Optimal':
+        total_reward = pulp.value(prob.objective)
+        total_duration = pulp.value(total_time)
+
+        try:
+            current_node = start_node
+            route = [start_node]
+            visited_count = 0
+
+            while visited_count <= num_n:
+                found_next = False
+                for j in nodes:
+                    if j != current_node and \
+                       x[current_node][j] is not None and \
+                       x[current_node][j].varValue is not None and \
+                       x[current_node][j].varValue > 0.99:
+                        route.append(j)
+                        current_node = j
+                        found_next = True
+                        break
+                visited_count += 1
+                if current_node == start_node:
+                    break
+                if not found_next:
+                    route = None
+                    break
+                if visited_count > num_n:
+                    route = None
+                    break
+
+            if route is None or route[0] != start_node or route[-1] != start_node:
+                route = None
+                total_reward = -np.inf
+                total_duration = np.inf
+                status = 'Error_In_Route'
+
+        except Exception as e:
+            print(f"Exception during MIP-Oracle route reconstruction for start {start_node}: {e}")
+            route = None
+            total_reward = -np.inf
+            total_duration = np.inf
+            status = 'Error_Exception'
+
+    if route is None:
+        total_reward = -np.inf
+        total_duration = np.inf
+        if status == 'Optimal':
+            status = 'Optimal_Route_Fail'
+
+    return status, route, total_reward, total_duration
+
+
 def solve_heuristic_rolling_horizon(
     start_node, time_m, rate_stack, loads_stack,
     distance_arr, diesel_arr, max_d, num_n, start_day_idx,
