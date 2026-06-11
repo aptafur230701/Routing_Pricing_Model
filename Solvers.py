@@ -1126,7 +1126,19 @@ def solve_HGA_LNS_metaheuristic(
                 population.append({'route': route, 'reward': rew, 'duration': dur})
 
     if not population:
-        return "Infeasible", None, -np.inf, np.inf
+        # Emergency fallback: greedy/NN/random all rejected every arc (e.g. all
+        # rewards negative on day_0). Sweep every direct out-and-back using
+        # time-only feasibility — mirrors solve_LNS_metaheuristic fallback logic.
+        for _nb in range(num_n):
+            if _nb == start_node:
+                continue
+            _t = float(time_m_np[start_node, _nb] + time_m_np[_nb, start_node])
+            if _t <= max_d:
+                _fb = [start_node, _nb, start_node]
+                _r, _d = _eval(_fb)
+                population.append({'route': _fb, 'reward': _r, 'duration': _d})
+        if not population:
+            return "Infeasible", None, -np.inf, np.inf
 
     best_overall = max(population, key=lambda x: x['reward'])
 
@@ -1186,7 +1198,20 @@ def solve_HGA_LNS_metaheuristic(
         and 2 <= len(best_overall['route']) <= max_route_len
     )
     final_status = "Optimal" if is_valid else "Infeasible"
-    return final_status, best_overall['route'], best_overall['reward'], best_overall['duration']
+    if not is_valid:
+        return final_status, None, -np.inf, np.inf
+
+    # Canonical re-evaluation via simulate_route_reward guarantees bit-exact
+    # parity with MIP-Exact and all other solvers. The internal _eval uses
+    # pre-cached numpy arrays (_rm_cache) whose float accumulation can diverge
+    # slightly from simulate_route_reward, causing the winner to appear above
+    # the MIP-Exact bound. Passing avail_prob_arr=None keeps this deterministic.
+    total_reward, total_duration = simulate_route_reward(
+        best_overall['route'], start_node, start_day_idx,
+        time_m_np, rate_stack, loads_stack, distance_arr, diesel_arr,
+        avail_prob_arr=None,
+    )
+    return final_status, best_overall['route'], total_reward, total_duration
 
 
 def _oracle_matrix_from_days(
