@@ -1455,6 +1455,174 @@ def solve_mip_oracle(
     return status, route, total_reward, total_duration
 
 
+def solve_mip_exact(
+    start_node:     int,
+    time_matrix_np: np.ndarray,
+    rate_stack:     np.ndarray,
+    loads_stack:    np.ndarray,
+    distance_arr:   np.ndarray,
+    diesel_arr:     np.ndarray,
+    max_d:          float,
+    num_n:          int,
+    start_day_idx:  int,
+    avail_prob_arr: np.ndarray = None,   # accepted but intentionally ignored
+) -> tuple:
+    """Exact time-indexed MIP — deterministic optimal upper bound.
+
+    Solves the routing problem on the *deterministic* world (no Bernoulli lane
+    filtering), so the returned reward is a provable upper bound for any solver
+    evaluated on the same deterministic reward matrices.
+
+    Day-partition formulation
+    -------------------------
+    K_max = floor(max_d / 14) gives at most K_max+1 ≤ 6 distinct day offsets.
+    Binary z[i,j,k] = 1 iff arc (i→j) is active AND int(t_i // 14) == k.
+    Continuous t[i] tracks the *exact* cumulative arrival time at each visited
+    node: tight lower AND upper bounds jointly enforce t[j] = t[i] + time[i,j]
+    on every active arc, preventing the solver from inflating t[i] to claim a
+    more profitable day slot.  The t propagation also eliminates subtours
+    (any non-depot cycle implies sum-of-times ≥ 0, contradiction).
+
+    Returns
+    -------
+    (status, route, total_reward, total_duration)
+    reward recomputed via simulate_route_reward(..., avail_prob_arr=None)
+    for bit-exact parity with the DRL deterministic evaluation.
+    """
+    from problem_data import build_day_matrices
+
+    max_day     = rate_stack.shape[0] - 1
+    nodes       = list(range(num_n))
+    other_nodes = [n for n in nodes if n != start_node]
+
+    K_max = int(max_d // 14)        # 5 for max_d ≈ 77
+    k_set = list(range(K_max + 1))
+    # BIG_M_T: big-M for time-propagation constraints (C4).
+    # Must be ≥ max_d + max(time[i,j]) so that inactive arcs impose no
+    # binding lower bound on arrival times of non-visited nodes.
+    BIG_M_T = float(max_d) + float(time_matrix_np.max())
+    # BIG_M_D: big-M for day-boundary constraints (C6). Only needs ≥ max_d.
+    BIG_M_D = float(max_d)
+    EPS     = 1e-6   # strict day-boundary upper bound (floor is left-closed)
+
+    # Pre-compute deterministic reward matrices for each day offset (no Bernoulli)
+    R_det = {}
+    for k in k_set:
+        day = min(start_day_idx + k, max_day)
+        rm, _ = build_day_matrices(
+            rate_stack[day], loads_stack[day], distance_arr, diesel_arr
+        )
+        R_det[k] = rm.to_numpy()   # shape (num_n, num_n), same as reward_matrix
+
+    # ── Build PuLP model ─────────────────────────────────────────────────────
+    prob = pulp.LpProblem(f"MIP_Exact_{start_node}", pulp.LpMaximize)
+
+    x = {(i, j): pulp.LpVariable(f"x_{i}_{j}", cat=pulp.LpBinary)
+         for i in nodes for j in nodes if i != j}
+
+    # Arrival time at node i — exact when tight bounds are active on the route
+    t = {i: pulp.LpVariable(f"t_{i}", lowBound=0.0, upBound=float(max_d))
+         for i in nodes}
+
+    # Day-arc indicator: z[i,j,k]=1 iff arc used AND node i in day slot k
+    z = {(i, j, k): pulp.LpVariable(f"z_{i}_{j}_{k}", cat=pulp.LpBinary)
+         for i in nodes for j in nodes if i != j
+         for k in k_set}
+
+    # Objective: day-exact deterministic reward
+    prob += pulp.lpSum(
+        float(R_det[k][i, j]) * z[(i, j, k)]
+        for i in nodes for j in nodes if i != j
+        for k in k_set
+    )
+
+    # C1 – Flow conservation + degree
+    prob += pulp.lpSum(x[(start_node, j)] for j in other_nodes) == 1
+    prob += pulp.lpSum(x[(j, start_node)] for j in other_nodes) == 1
+    for i in other_nodes:
+        prob += (pulp.lpSum(x[(i, j)] for j in nodes if j != i) ==
+                 pulp.lpSum(x[(j, i)] for j in nodes if j != i))
+        prob += pulp.lpSum(x[(j, i)] for j in nodes if j != i) <= 1
+
+    # C2 – Duration
+    prob += (pulp.lpSum(
+        float(time_matrix_np[i][j]) * x[(i, j)]
+        for i in nodes for j in nodes if i != j
+    ) <= max_d)
+
+    # C3 – Departure time at start node is always zero (day slot 0)
+    prob += t[start_node] == 0.0
+
+    # C4 – Exact arrival times (subtour elimination + day tracking).
+    # Both bounds together force t[j] = t[i] + time[i,j] on every active arc.
+    # BIG_M_T = max_d + max(time) ensures inactive arcs impose no spurious
+    # lower bounds on arrival times of non-visited nodes.
+    for j in other_nodes:
+        for i in nodes:
+            if i == j:
+                continue
+            tij = float(time_matrix_np[i][j])
+            prob += t[j] >= t[i] + tij - BIG_M_T * (1 - x[(i, j)])   # lower
+            prob += t[j] <= t[i] + tij + BIG_M_T * (1 - x[(i, j)])   # upper
+
+    # C5 – Each arc is assigned to exactly one day slot
+    for i in nodes:
+        for j in nodes:
+            if i == j:
+                continue
+            prob += pulp.lpSum(z[(i, j, k)] for k in k_set) == x[(i, j)]
+
+    # C6 – Day-slot boundaries: z[i,j,k]=1 ↔ t[i] ∈ [14k, 14(k+1))
+    for i in nodes:
+        for j in nodes:
+            if i == j:
+                continue
+            for k in k_set:
+                prob += t[i] >= 14.0 * k       - BIG_M_D * (1 - z[(i, j, k)])
+                prob += t[i] <= 14.0 * (k + 1) - EPS + BIG_M_D * (1 - z[(i, j, k)])
+
+    # ── Solve ────────────────────────────────────────────────────────────────
+    pulp.PULP_CBC_CMD(msg=0, timeLimit=600).solve(prob)
+
+    status = pulp.LpStatus[prob.status]
+    if status != 'Optimal':
+        return status, None, -np.inf, np.inf
+
+    # ── Route reconstruction ─────────────────────────────────────────────────
+    try:
+        cur   = start_node
+        route = [start_node]
+        for _ in range(num_n + 1):
+            moved = False
+            for j in nodes:
+                if j == cur:
+                    continue
+                v = x[(cur, j)].varValue
+                if v is not None and v > 0.99:
+                    route.append(j)
+                    cur = j
+                    moved = True
+                    break
+            if cur == start_node and len(route) > 1:
+                break
+            if not moved:
+                return 'Error_In_Route', None, -np.inf, np.inf
+        if route[0] != start_node or route[-1] != start_node:
+            return 'Error_In_Route', None, -np.inf, np.inf
+    except Exception as exc:
+        print(f"  [MIP-Exact] reconstruction error (start={start_node}): {exc}")
+        return 'Error_Exception', None, -np.inf, np.inf
+
+    # Final reward via simulate_route_reward with avail_prob_arr=None (no Bernoulli)
+    # to guarantee bit-exact parity with the DRL deterministic evaluation.
+    total_reward, total_duration = simulate_route_reward(
+        route, start_node, start_day_idx,
+        time_matrix_np, rate_stack, loads_stack, distance_arr, diesel_arr,
+        avail_prob_arr=None,
+    )
+    return status, route, total_reward, total_duration
+
+
 def solve_heuristic_rolling_horizon(
     start_node, time_m, rate_stack, loads_stack,
     distance_arr, diesel_arr, max_d, num_n, start_day_idx,

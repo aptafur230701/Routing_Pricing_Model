@@ -49,6 +49,7 @@ from evaluation import (
     run_solver_comparison, save_results, plot_diagnostics, plot_ppo_diagnostics,
 )
 from transfer_learning import build_agent_for_training
+from am_agent import AMRoutingAgent
 
 
 def set_seeds(seed: int):
@@ -94,6 +95,19 @@ def _run_am(
     return agent_am, ep_rewards, ep_losses, train_time, training_log
 
 
+def _load_agent(checkpoint_dir: str, num_nodes: int) -> "AMRoutingAgent":
+    """Carga un agente entrenado desde checkpoint sin reentrenar."""
+    path = os.path.join(checkpoint_dir, f"am_checkpoint_{num_nodes}nodes.pt")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Checkpoint no encontrado: {path}")
+    ckpt  = torch.load(path, map_location=DEVICE)
+    agent = AMRoutingAgent(num_nodes, device=DEVICE)
+    agent.load_state_dict(ckpt["agent"])
+    agent.eval()
+    print(f"Checkpoint cargado: {path}")
+    return agent
+
+
 def _evaluate_and_report(
     agent, NUM_NODES, time_matrix, rate_stack, loads_stack,
     distance_arr, diesel_arr, ep_rewards, ep_losses,
@@ -115,12 +129,12 @@ def _evaluate_and_report(
 
     def _gap_series(gap_col, solver_valid_col):
         return results_df.loc[
-            results_df["Oracle Valid"] & results_df[solver_valid_col], gap_col
+            results_df["MIP-Exact Valid"] & results_df[solver_valid_col], gap_col
         ].dropna()
 
-    drl_gap     = _gap_series("Oracle Gap vs DRL Real (%)",  "DRL Real Valid")
-    hga_gap     = _gap_series("Oracle Gap vs HGA-LNS (%)",   "HGA-LNS Valid")
-    rh_gap      = _gap_series("Oracle Gap vs RH-Greedy (%)", "RH-Greedy Valid")
+    drl_gap     = _gap_series("MIP-Exact Gap vs DRL Real (%)",  "DRL Real Valid")
+    hga_gap     = _gap_series("MIP-Exact Gap vs HGA-LNS (%)",   "HGA-LNS Valid")
+    rh_gap      = _gap_series("MIP-Exact Gap vs RH-Greedy (%)", "RH-Greedy Valid")
 
     def _gap_stats(series):
         if len(series) > 0:
@@ -134,7 +148,7 @@ def _evaluate_and_report(
     print(f"\n{'='*60}")
     print(f"  SUMMARY — {NUM_NODES} nodes  [{label}]")
     print(f"{'='*60}")
-    print(f"  MIP-Oracle avg reward  : {avg_valid('Oracle Reward',    'Oracle Valid'):.1f}")
+    print(f"  MIP-Exact avg reward   : {avg_valid('MIP-Exact Reward', 'MIP-Exact Valid'):.1f}")
     print(f"  DRL Real avg reward    : {avg_valid('DRL Real Reward',  'DRL Real Valid'):.1f}")
     print(f"  HGA-LNS avg reward     : {avg_valid('HGA-LNS Reward',   'HGA-LNS Valid'):.1f}")
     print(f"  RH-Greedy avg reward   : {avg_valid('RH-Greedy Reward', 'RH-Greedy Valid'):.1f}")
@@ -142,8 +156,8 @@ def _evaluate_and_report(
     print(f"  DRL Real avg inference : {np.mean(timing['drl_real_times'])*1000:.1f} ms")
     print(f"  HGA-LNS avg inference  : {np.mean(timing['hga_lns_times'])*1000:.1f} ms")
     print(f"  RH-Greedy avg inference: {np.mean(timing['rh_greedy_times'])*1000:.1f} ms")
-    print(f"  Oracle avg inference   : {np.mean(timing['oracle_times'])*1000:.1f} ms")
-    print(f"  --- Gaps vs MIP-Oracle ---")
+    print(f"  MIP-Exact avg inference: {np.mean(timing['mip_exact_times'])*1000:.1f} ms")
+    print(f"  --- Gaps vs MIP-Exact ---")
     print(f"  DRL Real  : avg {drl_avg_gap:.2f}%  max {drl_max_gap:.2f}%")
     print(f"  HGA-LNS   : avg {hga_avg_gap:.2f}%  max {hga_max_gap:.2f}%")
     print(f"  RH-Greedy : avg {rh_avg_gap:.2f}%  max {rh_max_gap:.2f}%")
@@ -151,7 +165,7 @@ def _evaluate_and_report(
     summary_rows.append({
         "Model":                           label,
         "Node Size":                       NUM_NODES,
-        "Oracle Avg Reward":               avg_valid("Oracle Reward",    "Oracle Valid"),
+        "MIP-Exact Avg Reward":            avg_valid("MIP-Exact Reward", "MIP-Exact Valid"),
         "DRL Real Avg Reward":             avg_valid("DRL Real Reward",  "DRL Real Valid"),
         "HGA-LNS Avg Reward":              avg_valid("HGA-LNS Reward",   "HGA-LNS Valid"),
         "RH-Greedy Avg Reward":            avg_valid("RH-Greedy Reward", "RH-Greedy Valid"),
@@ -159,27 +173,29 @@ def _evaluate_and_report(
         "DRL Real Avg Inference (ms)":     np.mean(timing["drl_real_times"]) * 1000,
         "HGA-LNS Avg Inference (ms)":      np.mean(timing["hga_lns_times"])  * 1000,
         "RH-Greedy Avg Inference (ms)":    np.mean(timing["rh_greedy_times"]) * 1000,
-        "Oracle Avg Inference (ms)":       np.mean(timing["oracle_times"])   * 1000,
-        "DRL Real Avg Gap vs Oracle (%)":  drl_avg_gap,
-        "DRL Real Max Gap vs Oracle (%)":  drl_max_gap,
-        "HGA-LNS Avg Gap vs Oracle (%)":   hga_avg_gap,
-        "HGA-LNS Max Gap vs Oracle (%)":   hga_max_gap,
-        "RH-Greedy Avg Gap vs Oracle (%)": rh_avg_gap,
-        "RH-Greedy Max Gap vs Oracle (%)": rh_max_gap,
+        "MIP-Exact Avg Inference (ms)":        np.mean(timing["mip_exact_times"]) * 1000,
+        "DRL Real Avg Gap vs MIP-Exact (%)":   drl_avg_gap,
+        "DRL Real Max Gap vs MIP-Exact (%)":   drl_max_gap,
+        "HGA-LNS Avg Gap vs MIP-Exact (%)":    hga_avg_gap,
+        "HGA-LNS Max Gap vs MIP-Exact (%)":    hga_max_gap,
+        "RH-Greedy Avg Gap vs MIP-Exact (%)":  rh_avg_gap,
+        "RH-Greedy Max Gap vs MIP-Exact (%)":  rh_max_gap,
     })
 
     excel_path = os.path.join(cwd, f"DRL_Routing_Summary_{label}.xlsx")
     plot_path  = os.path.join(cwd, f"DRL_Training_Diagnostics_{label}.png")
 
     save_results(results_df, summary_rows, excel_path)
-    plot_diagnostics(ep_rewards, ep_losses, results_df, NUM_NODES, plot_path)
+    if ep_rewards:
+        plot_diagnostics(ep_rewards, ep_losses, results_df, NUM_NODES, plot_path)
 
     return results_df
 
 
 def main():
-    # ── Cambia este valor según la rama en la que estés ────────────────────────
-    NUM_NODES = 10   # opciones: 10 · 20 · 35 · 50 · 75 · 97
+    # ── Cambia estos valores según lo que quieras hacer ───────────────────────
+    NUM_NODES  = 10     # opciones: 10 · 20 · 35 · 50 · 75 · 97
+    EVAL_ONLY  = True  # True: carga checkpoint y salta entrenamiento
     # ──────────────────────────────────────────────────────────────────────────
 
     cwd          = os.path.dirname(os.path.abspath(__file__))
@@ -207,14 +223,21 @@ def main():
     rate_eval   = rate_stack[TRAIN_DAYS:]
     loads_eval  = loads_stack[TRAIN_DAYS:]
 
-    agent_pretrained, critic_pretrained = build_agent_for_training(checkpoint_dir, NUM_NODES)
-    agent_am, ep_r, ep_l, t, training_log = _run_am(
-        NUM_NODES, time_matrix, rate_train, loads_train,
-        distance_arr, diesel_arr, checkpoint_dir,
-        agent_pretrained, critic_pretrained,
-        ltr_stack=ltr_stack, trucks_stack=trucks_stack,
-        avail_prob_arr=avail_prob_arr,
-    )
+    if EVAL_ONLY:
+        agent_am  = _load_agent(checkpoint_dir, NUM_NODES)
+        ep_r, ep_l, t, training_log = [], [], 0.0, []
+    else:
+        agent_pretrained, critic_pretrained = build_agent_for_training(checkpoint_dir, NUM_NODES)
+        agent_am, ep_r, ep_l, t, training_log = _run_am(
+            NUM_NODES, time_matrix, rate_train, loads_train,
+            distance_arr, diesel_arr, checkpoint_dir,
+            agent_pretrained, critic_pretrained,
+            ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+            avail_prob_arr=avail_prob_arr,
+        )
+        ppo_plot_path = os.path.join(output_dir, "PPO_Diagnostics_AM.png")
+        plot_ppo_diagnostics(training_log, NUM_NODES, ppo_plot_path)
+
     _evaluate_and_report(
         agent_am, NUM_NODES, time_matrix, rate_eval, loads_eval,
         distance_arr, diesel_arr, ep_r, ep_l, t,
@@ -222,8 +245,6 @@ def main():
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
         avail_prob_arr=avail_prob_arr,
     )
-    ppo_plot_path = os.path.join(output_dir, "PPO_Diagnostics_AM.png")
-    plot_ppo_diagnostics(training_log, NUM_NODES, ppo_plot_path)
 
     print(f"\nDone! Checkpoint guardado en: checkpoints/am_checkpoint_{NUM_NODES}nodes.pt")
 
