@@ -141,7 +141,7 @@ def transfer_checkpoint(
 
     checkpoint = torch.load(source_checkpoint, map_location=DEVICE)
 
-    # Instanciar modelos destino con la arquitectura actual (N_NODE_FEATURES=6, n_market=1)
+    # Instanciar modelos destino con la arquitectura actual (N_NODE_FEATURES=8, n_market=1)
     agent  = AMRoutingAgent(
         num_nodes=target_num_nodes,
         d_h=d_h, n_heads=n_heads, n_layers=n_layers, d_ff=d_ff,

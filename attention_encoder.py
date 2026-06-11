@@ -25,6 +25,7 @@ Features por nodo j (desde la posición actual del camión):
   [4] visited       — 1.0 si j ya fue visitado en el episodio, 0.0 si no
   [5] trucks_norm   — camiones disponibles en j para el delta correspondiente
   [6] avail_prior   — P(lane actual→j existe) según historial; prior del Bernoulli
+  [7] reward_abs    — reward crudo / REWARD_GLOBAL_P95, clipeado a [0, 1]; 0 si negativo
 
 Compatibilidad:
   · Sin dependencias de agent.py, training.py, routing_env.py ni evaluation.py.
@@ -41,7 +42,7 @@ import torch.nn.functional as F
 from config import LTR_CLIP, TRUCKS_CLIP
 
 # Número de features por nodo — debe coincidir con build_node_features()
-N_NODE_FEATURES = 7
+N_NODE_FEATURES = 8
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -60,6 +61,7 @@ def build_node_features(
     trucks_stack:           np.ndarray = None,  # (N, 3) — camiones por nodo×delta para el día actual
     time_matrix_arr:        np.ndarray = None,  # (N, N) numpy — para cálculo de delta_idx
     avail_prob_arr:         np.ndarray = None,  # (N, N) — prior Bernoulli por arco
+    reward_global_p95:      float      = 1.0,   # normalizador global para feature [7]
 ) -> np.ndarray:
     """
     Construye la matriz de features de nodos para el encoder.
@@ -84,6 +86,9 @@ def build_node_features(
     time_matrix_arr          : time_matrix como numpy array para cálculo de delta_idx.
     avail_prob_arr           : prior Bernoulli por arco — shape (N, N); feature [6] =
                                avail_prob_arr[current_node, j], ya en [0,1].
+
+    reward_global_p95 : normalizador global — P95 de valores positivos del rate_stack de
+                        entrenamiento; si se omite usa 1.0 (feature queda en escala cruda).
 
     Retorna
     -------
@@ -118,6 +123,8 @@ def build_node_features(
 
     # Recortar reward para evitar BIG_M_PENALTY (-1e9) en la diagonal
     feats[:, 0] = np.clip(feats[:, 0], -1e4, 1e4)
+    # Copia antes de normalizar: preserva la escala absoluta para feature [7]
+    raw_rewards = feats[:, 0].copy()
 
     # reward y distancia:
     # normalización relativa intra-fila para preservar ranking local
@@ -139,6 +146,14 @@ def build_node_features(
     # todos los demás arcos también sean largos.
     # Se aplica UNA sola vez para preservar la escala temporal real.
     feats[:, 1] = np.clip(feats[:, 1] / max(max_duration, 1e-6), 0.0, 1.0)
+
+    # Feature [7]: reward absoluto normalizado por el P95 global del entrenamiento.
+    # Complementa la feature [0] (ranking local) con información de escala absoluta.
+    # Valores negativos (arcos con costo neto) quedan en 0.0.
+    _denom = max(reward_global_p95, 1e-6)
+    feat7 = np.clip(raw_rewards / _denom, 0.0, 1.0)
+    feat7[raw_rewards < 0] = 0.0
+    feats[:, 7] = feat7
 
     if np.isnan(feats).any():
         bad = np.argwhere(np.isnan(feats)).tolist()
@@ -245,7 +260,7 @@ class AttentionEncoder(nn.Module):
 
     Parámetros
     ----------
-    d_input  : int — features por nodo (N_NODE_FEATURES = 7).
+    d_input  : int — features por nodo (N_NODE_FEATURES = 8).
     d_h      : int — dimensión del embedding (ej. 128).
     n_heads  : int — cabezas de atención (ej. 8, debe dividir d_h).
     n_layers : int — capas del encoder (ej. 3).

@@ -260,7 +260,7 @@ def main():
 
     print("\nCargando matrices...")
     (time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
-     ltr_stack, trucks_stack, avail_prob_arr) = load_matrices(NUM_NODES)
+     ltr_stack, trucks_stack, avail_prob_arr, _) = load_matrices(NUM_NODES)
     time_matrix_np = np.array(time_matrix, dtype=float)
     print(f"Nodos: {NUM_NODES} | días disponibles: {rate_stack.shape[0]} "
           f"| MAX_DURATION: {MAX_DURATION}h")

@@ -188,7 +188,7 @@ class RolloutBuffer:
 def _forward(
     agent:          AMRoutingAgent,
     critic:         CriticHead,
-    node_feats_t:   torch.Tensor,    # (B, N, 6)
+    node_feats_t:   torch.Tensor,    # (B, N, N_NODE_FEATURES)
     temporal_t:     torch.Tensor,    # (B, 3)
     current_nodes:  torch.Tensor,    # (B,) int64
     mask_t:         torch.Tensor,    # (B, N) int8
@@ -261,9 +261,10 @@ def run_am_training(
     num_nodes:      int,
     pretrained_agent:  AMRoutingAgent = None,
     pretrained_critic: CriticHead     = None,
-    ltr_stack:      np.ndarray = None,   # [num_nodes, 120]
-    trucks_stack:   np.ndarray = None,   # [num_nodes, 120, 3]
-    avail_prob_arr: np.ndarray = None,   # [num_nodes, num_nodes]
+    ltr_stack:         np.ndarray = None,   # [num_nodes, 120]
+    trucks_stack:      np.ndarray = None,   # [num_nodes, 120, 3]
+    avail_prob_arr:    np.ndarray = None,   # [num_nodes, num_nodes]
+    reward_global_p95: float      = 1.0,
 ) -> tuple:
     """
     Entrena AMRoutingAgent + CriticHead con PPO.
@@ -404,6 +405,7 @@ def run_am_training(
                         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
                         day_idx=current_day,
                         avail_prob_arr=avail_prob_arr,
+                        reward_global_p95=reward_global_p95,
                     )
 
                     next_obs, reward, terminated, truncated, info = env.step(action)
@@ -427,6 +429,7 @@ def run_am_training(
                             ltr_stack=ltr_stack, trucks_stack=trucks_stack,
                             day_idx=current_day_trunc,
                             avail_prob_arr=avail_prob_arr,
+                            reward_global_p95=reward_global_p95,
                         )
 
                     buffer.add(
@@ -477,7 +480,7 @@ def run_am_training(
                 # Reconstruir tensores del batch
                 nf_b   = torch.from_numpy(
                     np.stack([buffer.node_feats[i] for i in idx_batch])
-                ).to(DEVICE)                                           # (B, N, 6)
+                ).to(DEVICE)                                           # (B, N, N_NODE_FEATURES)
                 tf_b   = torch.from_numpy(
                     np.stack([buffer.temporal_feats[i] for i in idx_batch])
                 ).to(DEVICE)                                           # (B, 3)

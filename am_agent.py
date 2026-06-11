@@ -86,6 +86,7 @@ class AMRoutingAgent(nn.Module):
         trucks_stack:           np.ndarray,        # [num_nodes, 120, 3]
         day_idx:                int,
         avail_prob_arr:         np.ndarray = None, # [num_nodes, num_nodes]
+        reward_global_p95:      float      = 1.0,
     ):
         """
         Construye tensores de entrada y ejecuta encoder + context_net.
@@ -113,13 +114,14 @@ class AMRoutingAgent(nn.Module):
             trucks_stack=trucks_day,
             time_matrix_arr=time_matrix_arr,
             avail_prob_arr=avail_prob_arr,
+            reward_global_p95=reward_global_p95,
         )
         temporal = build_temporal_features(
             time_elapsed, step_count, max_duration, self.num_nodes
         )
         market = build_market_features(current_node, day_idx, ltr_stack)
 
-        feats_t    = torch.from_numpy(node_feats).unsqueeze(0).to(self.device)   # (1,N,6)
+        feats_t    = torch.from_numpy(node_feats).unsqueeze(0).to(self.device)   # (1,N,N_NODE_FEATURES)
         temporal_t = torch.from_numpy(temporal).unsqueeze(0).to(self.device)     # (1,3)
         market_t   = torch.from_numpy(market).unsqueeze(0).to(self.device)       # (1,1)
 
@@ -163,6 +165,7 @@ class AMRoutingAgent(nn.Module):
         trucks_stack:           np.ndarray,        # [num_nodes, 120, 3]
         day_idx:                int,
         avail_prob_arr:         np.ndarray = None, # [num_nodes, num_nodes]
+        reward_global_p95:      float      = 1.0,
     ):
         """
         Rollout unificado con beam search para cualquier beam_width >= 1.
@@ -213,6 +216,7 @@ class AMRoutingAgent(nn.Module):
                     reward_matrix_penalized, time_matrix, distance_arr,
                     max_duration, ltr_stack, trucks_stack, day_idx,
                     avail_prob_arr=avail_prob_arr,
+                    reward_global_p95=reward_global_p95,
                 )
 
                 # Máscara base: self-loop + intermedios visitados
@@ -347,6 +351,7 @@ class AMRoutingAgent(nn.Module):
         trucks_stack:           np.ndarray = None,   # [num_nodes, 120, 3]
         day_idx:                int        = 0,
         avail_prob_arr:         np.ndarray = None,   # [num_nodes, num_nodes]
+        reward_global_p95:      float      = 1.0,
     ):
         """
         Rollout determinista (sin gradientes) con el modelo actual.
@@ -382,6 +387,7 @@ class AMRoutingAgent(nn.Module):
                 distance_arr, max_duration, beam_width,
                 ltr_stack, trucks_stack, day_idx,
                 avail_prob_arr=avail_prob_arr,
+                reward_global_p95=reward_global_p95,
             )
         finally:
             self.train()
@@ -389,18 +395,19 @@ class AMRoutingAgent(nn.Module):
     @torch.no_grad()
     def beam_search_dynamic(
         self,
-        start_node:     int,
-        start_day_idx:  int,
+        start_node:        int,
+        start_day_idx:     int,
         time_matrix,
-        rate_stack:     np.ndarray,
-        loads_stack:    np.ndarray,
-        distance_arr:   np.ndarray,
-        diesel_arr:     np.ndarray,
-        max_duration:   float      = MAX_DURATION,
-        beam_width:     int        = None,
-        ltr_stack:      np.ndarray = None,   # [num_nodes, 120]
-        trucks_stack:   np.ndarray = None,   # [num_nodes, 120, 3]
-        avail_prob_arr: np.ndarray = None,   # [num_nodes, num_nodes]
+        rate_stack:        np.ndarray,
+        loads_stack:       np.ndarray,
+        distance_arr:      np.ndarray,
+        diesel_arr:        np.ndarray,
+        max_duration:      float      = MAX_DURATION,
+        beam_width:        int        = None,
+        ltr_stack:         np.ndarray = None,   # [num_nodes, 120]
+        trucks_stack:      np.ndarray = None,   # [num_nodes, 120, 3]
+        avail_prob_arr:    np.ndarray = None,   # [num_nodes, num_nodes]
+        reward_global_p95: float      = 1.0,
     ):
         """Beam search con días de mercado dinámicos y disponibilidad estocástica.
 
@@ -474,6 +481,7 @@ class AMRoutingAgent(nn.Module):
                     rm_day, time_matrix, distance_arr,
                     max_duration, ltr_stack, trucks_stack, day_idx,
                     avail_prob_arr=avail_prob_arr,
+                    reward_global_p95=reward_global_p95,
                 )
 
                 mask_int = self._build_mask(
@@ -621,6 +629,7 @@ class AMRoutingAgent(nn.Module):
         trucks_stack:           np.ndarray = None,
         day_idx:                int        = 0,
         avail_prob_arr:         np.ndarray = None,
+        reward_global_p95:      float      = 1.0,
     ) -> int:
         """Selección determinista (argmax de logits) para evaluación env-based."""
         embeddings, h_t, _, _, _ = self._encode_step(
@@ -629,6 +638,7 @@ class AMRoutingAgent(nn.Module):
             reward_matrix_penalized, time_matrix, distance_arr,
             max_duration, ltr_stack, trucks_stack, day_idx,
             avail_prob_arr=avail_prob_arr,
+            reward_global_p95=reward_global_p95,
         )
         mask_t    = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
         bool_mask = (mask_t == 0)
@@ -651,6 +661,7 @@ class AMRoutingAgent(nn.Module):
         trucks_stack:           np.ndarray = None,
         day_idx:                int        = 0,
         avail_prob_arr:         np.ndarray = None,
+        reward_global_p95:      float      = 1.0,
     ):
         """
         Paso estocástico para entrenamiento PPO.
@@ -667,6 +678,7 @@ class AMRoutingAgent(nn.Module):
             reward_matrix_penalized, time_matrix, distance_arr,
             max_duration, ltr_stack, trucks_stack, day_idx,
             avail_prob_arr=avail_prob_arr,
+            reward_global_p95=reward_global_p95,
         )
         mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
         action_t, log_prob, entropy = self.decoder.act(h_t, embeddings, mask_t)
@@ -689,6 +701,7 @@ class AMRoutingAgent(nn.Module):
         trucks_stack:           np.ndarray = None,
         day_idx:                int        = 0,
         avail_prob_arr:         np.ndarray = None,
+        reward_global_p95:      float      = 1.0,
     ):
         """
         Paso estocástico para recolección PPO: samplea acción y estima valor.
@@ -709,6 +722,7 @@ class AMRoutingAgent(nn.Module):
             reward_matrix_penalized, time_matrix, distance_arr,
             max_duration, ltr_stack, trucks_stack, day_idx,
             avail_prob_arr=avail_prob_arr,
+            reward_global_p95=reward_global_p95,
         )
         value  = critic(h_t).item()
         mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
@@ -731,6 +745,7 @@ class AMRoutingAgent(nn.Module):
         trucks_stack:           np.ndarray = None,
         day_idx:                int        = 0,
         avail_prob_arr:         np.ndarray = None,
+        reward_global_p95:      float      = 1.0,
     ) -> float:
         """Estima V(s) para bootstrap en episodios truncados."""
         _, h_t, _, _, _ = self._encode_step(
@@ -739,5 +754,6 @@ class AMRoutingAgent(nn.Module):
             reward_matrix_penalized, time_matrix, distance_arr,
             max_duration, ltr_stack, trucks_stack, day_idx,
             avail_prob_arr=avail_prob_arr,
+            reward_global_p95=reward_global_p95,
         )
         return critic(h_t).item()

@@ -65,6 +65,7 @@ def _run_am(
     distance_arr, diesel_arr, cwd,
     pretrained_agent=None, pretrained_critic=None,
     ltr_stack=None, trucks_stack=None, avail_prob_arr=None,
+    reward_global_p95=1.0,
 ):
     """Pipeline AM: entrenamiento PPO → checkpoint."""
     from am_training import run_am_training
@@ -84,6 +85,7 @@ def _run_am(
         pretrained_critic=pretrained_critic,
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
         avail_prob_arr=avail_prob_arr,
+        reward_global_p95=reward_global_p95,
     )
     train_time = time.time() - t0
     print(f"Training time: {train_time:.1f} s")
@@ -195,7 +197,7 @@ def _evaluate_and_report(
 def main():
     # ── Cambia estos valores según lo que quieras hacer ───────────────────────
     NUM_NODES  = 10     # opciones: 10 · 20 · 35 · 50 · 75 · 97
-    EVAL_ONLY  = True  # True: carga checkpoint y salta entrenamiento
+    EVAL_ONLY  = False  # True: carga checkpoint y salta entrenamiento
     # ──────────────────────────────────────────────────────────────────────────
 
     cwd          = os.path.dirname(os.path.abspath(__file__))
@@ -215,7 +217,7 @@ def main():
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, \
-        ltr_stack, trucks_stack, avail_prob_arr = load_matrices(NUM_NODES)
+        ltr_stack, trucks_stack, avail_prob_arr, reward_global_p95 = load_matrices(NUM_NODES)
 
     # ── Train / eval split (temporal — el modelo no ve los días de eval) ──────
     rate_train  = rate_stack[:TRAIN_DAYS]
@@ -234,6 +236,7 @@ def main():
             agent_pretrained, critic_pretrained,
             ltr_stack=ltr_stack, trucks_stack=trucks_stack,
             avail_prob_arr=avail_prob_arr,
+            reward_global_p95=reward_global_p95,
         )
         ppo_plot_path = os.path.join(output_dir, "PPO_Diagnostics_AM.png")
         plot_ppo_diagnostics(training_log, NUM_NODES, ppo_plot_path)

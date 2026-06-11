@@ -31,7 +31,7 @@ def main():
 
     # ── Cargar datos reales ───────────────────────────────────
     print("\nCargando matrices...")
-    time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, _ = \
+    time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, *_ = \
         load_matrices(NUM_NODES)
 
     _, reward_matrix_penalized = build_day_matrices(

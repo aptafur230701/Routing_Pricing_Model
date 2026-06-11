@@ -161,8 +161,15 @@ def load_matrices(num_nodes: int) -> tuple:
     eval_days  = num_days - train_days
     print(f"Multi-day data  : {num_days} días totales | train={train_days} | eval={eval_days}")
 
+    # P95 de los valores positivos del rate_stack de entrenamiento.
+    # Usado como normalizador global de rewards en la feature [7] del encoder.
+    rate_train_slice = rate_stack[:train_days]
+    _pos_vals = rate_train_slice[rate_train_slice > 0].ravel()
+    reward_global_p95 = float(np.percentile(_pos_vals, 95)) if len(_pos_vals) > 0 else 1.0
+    print(f"REWARD_GLOBAL_P95: {reward_global_p95:.4f}")
+
     return time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr, \
-           ltr_stack, trucks_stack, avail_prob_arr
+           ltr_stack, trucks_stack, avail_prob_arr, reward_global_p95
 
 
 
