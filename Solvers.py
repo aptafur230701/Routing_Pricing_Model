@@ -1041,9 +1041,11 @@ def solve_HGA_LNS_metaheuristic(
     · LNS destroy/repair replaces classical mutation for targeted local exploitation.
     · 2-opt refinement polishes each offspring's geometry after repair.
 
-    The internal fitness uses the static matrix for start_day_idx; the reported
-    reward is recomputed with simulate_route_reward() so it uses real sequential
-    arrival days — matching DRL Real and RH-Greedy.
+    Internal fitness uses simulate_route_reward() with sequential arrival days
+    (avail_prob_arr=None, deterministic world), so every individual in the
+    population is evaluated on the same footing as MIP-Exact and DRL Det.
+    Search operators (crossover, LNS repair, 2-opt) still use the static day-0
+    reward matrix for fast local decisions.
 
     Returns: status, route, total_reward, total_duration  (same format as solve_mip)
     """
@@ -1051,6 +1053,19 @@ def solve_HGA_LNS_metaheuristic(
     _, reward_m = build_day_matrices(
         rate_stack[start_day_idx], loads_stack[start_day_idx], distance_arr, diesel_arr
     )
+    time_m_np = np.array(time_m, dtype=float)
+
+    # Pre-cache reward matrices as numpy arrays so _eval avoids pandas overhead.
+    # Semantically identical to simulate_route_reward(..., avail_prob_arr=None).
+    max_day = rate_stack.shape[0] - 1
+    _max_offset = int(max_d // 14) + 2
+    _rm_cache: dict = {}
+    for _d in range(start_day_idx, min(start_day_idx + _max_offset, max_day + 1)):
+        _, _rm_df = build_day_matrices(rate_stack[_d], loads_stack[_d], distance_arr, diesel_arr)
+        _rm_cache[_d] = _rm_df.to_numpy()
+    if max_day not in _rm_cache:
+        _, _rm_df = build_day_matrices(rate_stack[max_day], loads_stack[max_day], distance_arr, diesel_arr)
+        _rm_cache[max_day] = _rm_df.to_numpy()
 
     if seed is not None:
         np.random.seed(seed)
@@ -1067,32 +1082,46 @@ def solve_HGA_LNS_metaheuristic(
     # --- Step 1: Initialize Population (identical seeding strategy to GA) ---
     population = []
 
-    _, route, reward, duration, is_valid = solve_heuristic(
+    def _eval(route):
+        """Fast canonical fitness: pre-cached numpy matrices, sequential arrival days."""
+        if route is None or len(route) < 2:
+            return -np.inf, np.inf
+        t = 0.0
+        r = 0.0
+        for k in range(len(route) - 1):
+            i, j = route[k], route[k + 1]
+            d = min(start_day_idx + int(t // 14), max_day)
+            r += _rm_cache[d][i, j]
+            t += time_m_np[i, j]
+        return r, t
+
+    _, route, _, _, is_valid = solve_heuristic(
         start_node, time_m, reward_m, max_d, num_n
     )
     if is_valid and len(route) <= max_route_len:
-        population.append({'route': route, 'reward': reward, 'duration': duration})
+        rew, dur = _eval(route)
+        population.append({'route': route, 'reward': rew, 'duration': dur})
 
     for _ in range(max(2, population_size // 4)):
         route = _generate_route_nearest_neighbor(start_node, time_m, reward_m, max_d, num_n)
         if route and len(route) <= max_route_len:
-            dur = sum(time_m[route[i]][route[i+1]] for i in range(len(route)-1))
-            rew = sum(reward_m[route[i]][route[i+1]] for i in range(len(route)-1))
+            rew, dur = _eval(route)
             if dur <= max_d:
                 population.append({'route': route, 'reward': rew, 'duration': dur})
 
     for _ in range(max(2, population_size // 4)):
         route = _generate_random_feasible_route(start_node, time_m, reward_m, max_d, num_n)
         if route and len(route) <= max_route_len:
-            dur = sum(time_m[route[i]][route[i+1]] for i in range(len(route)-1))
-            rew = sum(reward_m[route[i]][route[i+1]] for i in range(len(route)-1))
-            population.append({'route': route, 'reward': rew, 'duration': dur})
+            rew, dur = _eval(route)
+            if dur <= max_d:
+                population.append({'route': route, 'reward': rew, 'duration': dur})
 
-    while len(population) < population_size:
-        route = _generate_route_nearest_neighbor(start_node, time_m, reward_m, max_d, num_n)
+    _fill_iters = 0
+    while len(population) < population_size and _fill_iters < population_size * 10:
+        _fill_iters += 1
+        route = _generate_random_feasible_route(start_node, time_m, reward_m, max_d, num_n)
         if route and len(route) <= max_route_len:
-            dur = sum(time_m[route[i]][route[i+1]] for i in range(len(route)-1))
-            rew = sum(reward_m[route[i]][route[i+1]] for i in range(len(route)-1))
+            rew, dur = _eval(route)
             if dur <= max_d:
                 population.append({'route': route, 'reward': rew, 'duration': dur})
 
@@ -1114,7 +1143,11 @@ def solve_HGA_LNS_metaheuristic(
 
         # Crossover + LNS-mutation to build offspring
         offspring = elite[:]
+        _off_iters = 0
         while len(offspring) < population_size:
+            _off_iters += 1
+            if _off_iters > population_size * 30:
+                break
             if np.random.rand() < crossover_rate:
                 p1 = mating_pool[np.random.randint(0, len(mating_pool))]
                 p2 = mating_pool[np.random.randint(0, len(mating_pool))]
@@ -1135,10 +1168,7 @@ def solve_HGA_LNS_metaheuristic(
                 )
 
             if child_route and len(child_route) <= max_route_len:
-                child_dur = sum(time_m[child_route[i]][child_route[i+1]]
-                                for i in range(len(child_route)-1))
-                child_rew = sum(reward_m[child_route[i]][child_route[i+1]]
-                                for i in range(len(child_route)-1))
+                child_rew, child_dur = _eval(child_route)
                 if child_dur <= max_d:
                     offspring.append({'route': child_route, 'reward': child_rew, 'duration': child_dur})
 
@@ -1156,17 +1186,6 @@ def solve_HGA_LNS_metaheuristic(
         and 2 <= len(best_overall['route']) <= max_route_len
     )
     final_status = "Optimal" if is_valid else "Infeasible"
-
-    if is_valid:
-        # Recompute reward with actual sequential arrival days so it is
-        # commensurable with DRL Real and RH-Greedy (same logic as MIP-Oracle).
-        sim_reward, sim_duration = simulate_route_reward(
-            best_overall['route'], start_node, start_day_idx,
-            np.array(time_m, dtype=float), rate_stack, loads_stack,
-            distance_arr, diesel_arr,
-        )
-        return final_status, best_overall['route'], sim_reward, sim_duration
-
     return final_status, best_overall['route'], best_overall['reward'], best_overall['duration']
 
 
@@ -1654,36 +1673,29 @@ def solve_heuristic_rolling_horizon(
 
     current_node = start_node
     time_elapsed = 0.0
-    total_reward = 0.0
     route = [start_node]
     visited = {start_node}
     steps = 0
     max_arcs = num_n - 1
 
     while steps < max_arcs:
-        # Día corriente: la decisión se toma con la matriz del día actual.
+        # Decision uses the current-day matrix (causal, same info as DRL).
         rm = reward_matrix_for_time(time_elapsed)
 
-        best_reward = -np.inf
+        best_score = -np.inf
         best_next_node = None
 
         for next_node in range(num_n):
             if next_node != current_node and next_node not in visited:
                 step_time = time_m[current_node][next_node]
                 return_time = time_m[next_node][start_node]
-                total_future_time = time_elapsed + step_time + return_time
-                if total_future_time <= max_d:
-                    step_reward = rm[current_node][next_node]
-                    return_reward = rm[next_node][start_node]
-                    total_cycle_reward = step_reward + return_reward
-                    if total_cycle_reward > best_reward:
-                        best_reward = total_cycle_reward
+                if time_elapsed + step_time + return_time <= max_d:
+                    score = rm[current_node][next_node] + rm[next_node][start_node]
+                    if score > best_score:
+                        best_score = score
                         best_next_node = next_node
 
         if best_next_node is not None:
-            # La recompensa REALIZADA se acumula con la matriz del día en que se
-            # ejecuta el arco (mismo día con que se decidió, antes de avanzar).
-            total_reward += rm[current_node][best_next_node]
             time_elapsed += time_m[current_node][best_next_node]
             current_node = best_next_node
             route.append(current_node)
@@ -1692,16 +1704,22 @@ def solve_heuristic_rolling_horizon(
         else:
             break
 
-    # Cerrar ciclo con la matriz del día en que se ejecuta el arco de retorno.
+    # Close cycle (time only — reward not accumulated here).
     if route[-1] != start_node:
         return_time = time_m[current_node][start_node]
         if time_elapsed + return_time <= max_d:
-            rm_close = reward_matrix_for_time(time_elapsed)
-            total_reward += rm_close[current_node][start_node]
             time_elapsed += return_time
             route.append(start_node)
 
-    is_valid = (route[-1] == start_node and len(route) > 1
-                and time_elapsed <= max_d)
+    if route[-1] != start_node or len(route) < 2:
+        return "Infeasible", route if len(route) > 1 else None, -np.inf, time_elapsed, False
+
+    # Canonical evaluation — bit-exact with MIP-Exact and DRL Det.
+    total_reward, total_duration = simulate_route_reward(
+        route, start_node, start_day_idx,
+        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+        avail_prob_arr=None,
+    )
+    is_valid = total_duration <= max_d
     status = "Optimal" if is_valid else "Infeasible"
-    return status, route, total_reward, time_elapsed, is_valid
+    return status, route, total_reward, total_duration, is_valid
