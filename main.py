@@ -156,6 +156,18 @@ def _evaluate_and_report(
     ).dropna()
     real_vs_det_avg, _ = _gap_stats(real_vs_det_series)
 
+    drl_vs_rh_stoch_valid = results_df["DRL Real Valid"] & results_df["RH-Greedy Real Valid"]
+    drl_vs_rh_stoch_series = results_df.loc[drl_vs_rh_stoch_valid].apply(
+        lambda r: (r["DRL Real Reward"] - r["RH-Greedy Real Reward"]) / abs(r["RH-Greedy Real Reward"]) * 100
+        if r["RH-Greedy Real Reward"] != 0 else float("nan"), axis=1
+    ).dropna()
+    drl_vs_rh_stoch_avg, _ = _gap_stats(drl_vs_rh_stoch_series)
+    # Promedios restringidos a la intersección — misma población que el gap
+    drl_real_on_both  = results_df.loc[drl_vs_rh_stoch_valid, "DRL Real Reward"].mean() \
+                        if drl_vs_rh_stoch_valid.any() else float("nan")
+    rh_stoch_on_both  = results_df.loc[drl_vs_rh_stoch_valid, "RH-Greedy Real Reward"].mean() \
+                        if drl_vs_rh_stoch_valid.any() else float("nan")
+
     drl_both_ms = np.mean(timing["drl_det_times"] + timing["drl_real_times"]) * 1000
 
     print(f"\n{'='*60}")
@@ -166,13 +178,18 @@ def _evaluate_and_report(
     print(f"  DRL Det avg reward   : {avg_valid('DRL Det Reward', 'DRL Det Valid'):>10.1f}  | gap vs MIP: avg {drl_det_avg_gap:.2f}%  max {drl_det_max_gap:.2f}%")
     print(f"  HGA-LNS avg reward   : {avg_valid('HGA-LNS Reward', 'HGA-LNS Valid'):>10.1f}  | gap vs MIP: avg {hga_avg_gap:.2f}%  max {hga_max_gap:.2f}%")
     print(f"  RH-Greedy avg reward : {avg_valid('RH-Greedy Reward', 'RH-Greedy Valid'):>10.1f}  | gap vs MIP: avg {rh_avg_gap:.2f}%  max {rh_max_gap:.2f}%")
-    print(f"\n  Bloque 2 — Costo de ejecución estocástica")
-    print(f"  DRL Real avg reward  : {avg_valid('DRL Real Reward', 'DRL Real Valid'):>10.1f}  | gap vs DRL Det: avg ~{real_vs_det_avg:.1f}%")
+    print(f"\n  Bloque 2 — Costo de ejecución estocástica  (n ambos válidos={drl_vs_rh_stoch_valid.sum()})")
+    print(f"  DRL Real avg reward      : {avg_valid('DRL Real Reward', 'DRL Real Valid'):>10.1f}  | gap vs DRL Det: avg ~{real_vs_det_avg:.1f}%")
+    print(f"  RH-Greedy Real avg reward: {avg_valid('RH-Greedy Real Reward', 'RH-Greedy Real Valid'):>10.1f}")
+    print(f"  DRL Real reward          : {drl_real_on_both:>10.1f}")
+    print(f"  RH-Greedy Real reward    : {rh_stoch_on_both:>10.1f}")
+    print(f"  DRL Real advantage vs RH-Greedy Real: avg ~{drl_vs_rh_stoch_avg:.1f}%")
     print(f"\n  Bloque 3 — Tiempo de inferencia")
     print(f"  DRL (Det+Real) : {drl_both_ms:>6.0f} ms")
     print(f"  HGA-LNS        : {np.mean(timing['hga_lns_times'])*1000:>6.0f} ms")
     print(f"  MIP-Exact      : {np.mean(timing['mip_exact_times'])*1000:>6.0f} ms")
     print(f"  RH-Greedy      : {np.mean(timing['rh_greedy_times'])*1000:>6.0f} ms")
+    print(f"  RH-Greedy Real : {np.mean(timing['rh_stoch_times'])*1000:>6.0f} ms")
     print(f"  Training time  : {train_time:.1f} s")
     print(f"{'='*60}")
 
@@ -184,6 +201,10 @@ def _evaluate_and_report(
         "DRL Real Avg Reward":             avg_valid("DRL Real Reward",  "DRL Real Valid"),
         "HGA-LNS Avg Reward":              avg_valid("HGA-LNS Reward",   "HGA-LNS Valid"),
         "RH-Greedy Avg Reward":            avg_valid("RH-Greedy Reward", "RH-Greedy Valid"),
+        "RH-Greedy Real Avg Reward":                avg_valid("RH-Greedy Real Reward", "RH-Greedy Real Valid"),
+        "DRL Real Avg Reward (intersección)":       drl_real_on_both,
+        "RH-Greedy Real Avg Reward (intersección)": rh_stoch_on_both,
+        "DRL Real Advantage vs RH-Greedy Real (%)": drl_vs_rh_stoch_avg,
         "DRL Training Time (s)":           train_time,
         "DRL Real Avg Inference (ms)":     np.mean(timing["drl_real_times"]) * 1000,
         "HGA-LNS Avg Inference (ms)":      np.mean(timing["hga_lns_times"])  * 1000,

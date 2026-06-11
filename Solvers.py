@@ -1748,3 +1748,86 @@ def solve_heuristic_rolling_horizon(
     is_valid = total_duration <= max_d
     status = "Optimal" if is_valid else "Infeasible"
     return status, route, total_reward, total_duration, is_valid
+
+
+def solve_heuristic_rolling_horizon_stochastic(
+    start_node, time_m, rate_stack, loads_stack,
+    distance_arr, diesel_arr, max_d, num_n, start_day_idx, avail_prob_arr,
+):
+    """Variante estocástica de solve_heuristic_rolling_horizon.
+
+    Idéntica a la versión determinista salvo que en cada paso descarta los
+    nodos cuya lane está bloqueada según draw_lane_availability (mundo Bernoulli).
+    La evaluación final usa simulate_route_reward con avail_prob_arr.
+    """
+    from problem_data import build_day_matrices, draw_lane_availability
+
+    num_days = rate_stack.shape[0]
+
+    def reward_matrix_for_time(t_elapsed):
+        day_idx = min(start_day_idx + int(t_elapsed // 14), num_days - 1)
+        _, rm_pen = build_day_matrices(
+            rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+        )
+        return rm_pen
+
+    if hasattr(time_m, 'iloc'):
+        time_m = np.array(time_m, dtype=float)
+
+    current_node = start_node
+    time_elapsed = 0.0
+    route = [start_node]
+    visited = {start_node}
+    steps = 0
+    max_arcs = num_n - 1
+
+    while steps < max_arcs:
+        rm = reward_matrix_for_time(time_elapsed)
+        current_arrival_day = min(start_day_idx + int(time_elapsed // 14), num_days - 1)
+        lane_exists = draw_lane_availability(
+            start_day_idx, node=current_node, arrival_day=current_arrival_day,
+            avail_prob_arr=avail_prob_arr, num_nodes=num_n,
+        )
+
+        best_score = -np.inf
+        best_next_node = None
+
+        for next_node in range(num_n):
+            if next_node != current_node and next_node not in visited:
+                if lane_exists[next_node] != 1:
+                    continue
+                step_time = time_m[current_node][next_node]
+                return_time = time_m[next_node][start_node]
+                if time_elapsed + step_time + return_time <= max_d:
+                    score = rm[current_node][next_node] + rm[next_node][start_node]
+                    if score > best_score:
+                        best_score = score
+                        best_next_node = next_node
+
+        if best_next_node is not None:
+            time_elapsed += time_m[current_node][best_next_node]
+            current_node = best_next_node
+            route.append(current_node)
+            visited.add(current_node)
+            steps += 1
+        else:
+            break
+
+    # Close cycle (time only — reward not accumulated here).
+    if route[-1] != start_node:
+        return_time = time_m[current_node][start_node]
+        if time_elapsed + return_time <= max_d:
+            time_elapsed += return_time
+            route.append(start_node)
+
+    if route[-1] != start_node or len(route) < 2:
+        return "Infeasible", route if len(route) > 1 else None, -np.inf, time_elapsed, False
+
+    total_reward, total_duration = simulate_route_reward(
+        route, start_node, start_day_idx,
+        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+        avail_prob_arr=avail_prob_arr,
+    )
+    is_valid = total_duration <= max_d
+    status = "Optimal" if is_valid else "Infeasible"
+    return status, route, total_reward, total_duration, is_valid
