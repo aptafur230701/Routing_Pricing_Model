@@ -1030,14 +1030,28 @@ def _apply_lns_mutation(route, start_node, time_m, reward_m, max_d, destroy_size
     return repaired_route
 
 
-def solve_HGA_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n, seed=None):
+def solve_HGA_LNS_metaheuristic(
+    start_node, time_m, max_d, num_n,
+    rate_stack, loads_stack, distance_arr, diesel_arr, start_day_idx,
+    seed=None,
+):
     """
     Hybrid Genetic Algorithm – Large Neighborhood Search (HGA-LNS):
     · GA drives global exploration: diverse population, tournament selection, OX crossover.
     · LNS destroy/repair replaces classical mutation for targeted local exploitation.
     · 2-opt refinement polishes each offspring's geometry after repair.
+
+    The internal fitness uses the static matrix for start_day_idx; the reported
+    reward is recomputed with simulate_route_reward() so it uses real sequential
+    arrival days — matching DRL Real and RH-Greedy.
+
     Returns: status, route, total_reward, total_duration  (same format as solve_mip)
     """
+    from problem_data import build_day_matrices
+    _, reward_m = build_day_matrices(
+        rate_stack[start_day_idx], loads_stack[start_day_idx], distance_arr, diesel_arr
+    )
+
     if seed is not None:
         np.random.seed(seed)
     max_route_len = num_n
@@ -1142,33 +1156,33 @@ def solve_HGA_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n, seed
         and 2 <= len(best_overall['route']) <= max_route_len
     )
     final_status = "Optimal" if is_valid else "Infeasible"
+
+    if is_valid:
+        # Recompute reward with actual sequential arrival days so it is
+        # commensurable with DRL Real and RH-Greedy (same logic as MIP-Oracle).
+        sim_reward, sim_duration = simulate_route_reward(
+            best_overall['route'], start_node, start_day_idx,
+            np.array(time_m, dtype=float), rate_stack, loads_stack,
+            distance_arr, diesel_arr,
+        )
+        return final_status, best_overall['route'], sim_reward, sim_duration
+
     return final_status, best_overall['route'], best_overall['reward'], best_overall['duration']
 
 
-def build_oracle_reward_matrix(
-    start_node, time_matrix_np, rate_stack, loads_stack,
+def _oracle_matrix_from_days(
+    arrival_days, start_node, rate_stack, loads_stack,
     distance_arr, diesel_arr, start_day_idx, avail_prob_arr,
     num_nodes, max_day,
 ):
-    """Oracle reward matrix with perfect information: correct arrival day per node
-    and exact Bernoulli lane realizations using the same deterministic seed as
-    draw_lane_availability in problem_data.py."""
-    from scipy.sparse.csgraph import shortest_path
-    from scipy.sparse import csr_matrix
+    """Build the oracle reward matrix given a pre-computed per-node arrival-day array.
+
+    Arcs from/to start_node are never Bernoulli-filtered, matching
+    beam_search_dynamic which skips lane filtering when current_node == start_node.
+    Blocked arcs (lane_exists[j] == 0) get BIG_M_PENALTY so the MIP avoids them.
+    """
     from config import MPG, MARGINAL_COST_SIN_DIESEL, BIG_M_PENALTY
 
-    # Dijkstra: minimum travel time from start_node to every other node
-    sparse_tm = csr_matrix(time_matrix_np)
-    dist_matrix = shortest_path(sparse_tm, method='D', directed=True, indices=start_node)
-    t_shortest = dist_matrix  # shape (N,)
-
-    # Arrival day per node
-    arrival_days = np.array([
-        min(start_day_idx + int(t_shortest[i] // 14), max_day)
-        for i in range(num_nodes)
-    ], dtype=np.int32)
-
-    # Pre-build reward arrays grouped by unique arrival day
     unique_days = np.unique(arrival_days)
     reward_by_day = {}
     for d in unique_days:
@@ -1177,10 +1191,6 @@ def build_oracle_reward_matrix(
         cost = distance_arr * (diesel_arr / MPG) + distance_arr * MARGINAL_COST_SIN_DIESEL
         reward_by_day[d] = np.round(revenue - cost, 0)
 
-    # Build oracle matrix: sorted lane availability with deterministic seeds.
-    # Arcs from/to start_node are never filtered by Bernoulli — this matches
-    # beam_search_dynamic, which skips lane filtering when current_node == start_node
-    # and never blocks the return arc (j == start_node).
     oracle_r = np.full((num_nodes, num_nodes), BIG_M_PENALTY, dtype=np.float64)
     for i in range(num_nodes):
         arrival_day_i = int(arrival_days[i])
@@ -1191,7 +1201,6 @@ def build_oracle_reward_matrix(
             if i == j:
                 oracle_r[i, j] = BIG_M_PENALTY
             elif i == start_node or j == start_node:
-                # Departure from start and return to start are always available
                 oracle_r[i, j] = reward_by_day[arrival_day_i][i, j]
             elif lane_exists[j] == 1:
                 oracle_r[i, j] = reward_by_day[arrival_day_i][i, j]
@@ -1200,24 +1209,62 @@ def build_oracle_reward_matrix(
     return oracle_r
 
 
+def build_oracle_reward_matrix(
+    start_node, time_matrix_np, rate_stack, loads_stack,
+    distance_arr, diesel_arr, start_day_idx, avail_prob_arr,
+    num_nodes, max_day,
+):
+    """Oracle reward matrix using Dijkstra arrival days (public helper, kept for compat).
+
+    solve_mip_oracle uses _oracle_matrix_from_days directly with iteratively
+    refined arrival days; this function is retained as a convenience entry point.
+    """
+    from scipy.sparse.csgraph import shortest_path
+    from scipy.sparse import csr_matrix
+
+    sparse_tm    = csr_matrix(time_matrix_np)
+    dist_matrix  = shortest_path(sparse_tm, method='D', directed=True, indices=start_node)
+    arrival_days = np.array([
+        min(start_day_idx + int(dist_matrix[i] // 14), max_day)
+        for i in range(num_nodes)
+    ], dtype=np.int32)
+
+    return _oracle_matrix_from_days(
+        arrival_days, start_node, rate_stack, loads_stack,
+        distance_arr, diesel_arr, start_day_idx, avail_prob_arr,
+        num_nodes, max_day,
+    )
+
+
 def simulate_route_reward(
     route, start_node, start_day_idx,
     time_matrix_np, rate_stack, loads_stack,
     distance_arr, diesel_arr,
+    avail_prob_arr=None,
 ):
-    """Compute the actual reward for a fixed route using sequential arrival days.
+    """Compute the actual reward for a fixed route using sequential arrival days
+    and the same Bernoulli lane-availability draws as beam_search_dynamic.
 
-    Replicates the day-index logic from beam_search_dynamic:
-        day_idx = min(start_day_idx + int(time_elapsed // 14), max_day)
-    so each arc uses the real market day at the time it is executed, not the
-    Dijkstra-based estimate used inside build_oracle_reward_matrix.
+    Replicates beam_search_dynamic exactly:
+    - day_idx = min(start_day_idx + int(time_elapsed // 14), max_day)
+    - draw_lane_availability(start_day_idx, node=i, arrival_day=day_idx, ...)
+      applied on every arc except those departing from or arriving at start_node,
+      matching the skip-condition on line "current_node != start_node" in
+      beam_search_dynamic.
+    - If a lane is blocked (lane_exists[j] == 0), that arc yields 0 reward
+      (no cargo to haul; this is consistent with the BIG_M_PENALTY the MIP
+      assigns to blocked arcs to avoid them during planning).
+
+    If avail_prob_arr is None, no Bernoulli filtering is applied (backward
+    compatible with callers that do not supply availability data).
     """
-    from problem_data import build_day_matrices
+    from problem_data import build_day_matrices, draw_lane_availability
 
     if route is None or len(route) < 2:
         return -np.inf, np.inf
 
-    max_day = rate_stack.shape[0] - 1
+    max_day   = rate_stack.shape[0] - 1
+    num_nodes = distance_arr.shape[0]
     day_cache = {}
 
     def _get_rm(day_idx):
@@ -1232,11 +1279,25 @@ def simulate_route_reward(
     total_reward = 0.0
 
     for step in range(len(route) - 1):
-        i = route[step]
-        j = route[step + 1]
+        i       = route[step]
+        j       = route[step + 1]
         day_idx = min(start_day_idx + int(time_elapsed // 14), max_day)
-        rm = _get_rm(day_idx)
-        total_reward += float(rm.iloc[i, j])
+        rm      = _get_rm(day_idx)
+        arc_r   = float(rm.iloc[i, j])
+
+        # Mirror beam_search_dynamic: skip Bernoulli when departing from or
+        # arriving at start_node (those arcs are always available).
+        if (avail_prob_arr is not None
+                and i != start_node
+                and j != start_node):
+            lane_exists = draw_lane_availability(
+                start_day_idx, node=i, arrival_day=day_idx,
+                avail_prob_arr=avail_prob_arr, num_nodes=num_nodes,
+            )
+            if lane_exists[j] == 0:
+                arc_r = 0.0
+
+        total_reward += arc_r
         time_elapsed += float(time_matrix_np[i][j])
 
     return total_reward, time_elapsed
@@ -1245,114 +1306,152 @@ def simulate_route_reward(
 def solve_mip_oracle(
     start_node, time_matrix_np, rate_stack, loads_stack,
     distance_arr, diesel_arr, max_d, num_n, start_day_idx, avail_prob_arr,
+    max_iter=5,
 ):
-    """MIP with perfect-information oracle reward matrix (dynamic days + Bernoulli)."""
-    oracle_r = build_oracle_reward_matrix(
-        start_node=start_node,
-        time_matrix_np=time_matrix_np,
-        rate_stack=rate_stack,
-        loads_stack=loads_stack,
-        distance_arr=distance_arr,
-        diesel_arr=diesel_arr,
-        start_day_idx=start_day_idx,
-        avail_prob_arr=avail_prob_arr,
-        num_nodes=num_n,
-        max_day=rate_stack.shape[0] - 1,
-    )
+    """MIP oracle with iterative arrival-day refinement.
 
-    nodes = list(range(num_n))
+    Iteration 0 uses Dijkstra arrival days as the initial estimate.  After each
+    MIP solve the chosen route is walked sequentially; the real arrival day for
+    every visited node is fed back into arrival_days and the MIP is re-solved.
+    The loop stops when the route stops changing (fixed point) or max_iter is
+    reached.  At convergence, the Bernoulli seeds used inside the oracle matrix
+    match exactly the seeds that draw_lane_availability would produce during a
+    DRL Real rollout following the same route — eliminating the Dijkstra-day
+    inconsistency.  Nodes never visited by the converged route retain Dijkstra
+    days (they were evaluated but not selected, so their seeds don't affect the
+    final result).
+
+    The final reported reward is computed by simulate_route_reward with real
+    sequential days and Bernoulli filtering, keeping the Oracle on the same
+    stochastic footing as DRL Real.
+    """
+    from scipy.sparse.csgraph import shortest_path
+    from scipy.sparse import csr_matrix
+
+    max_day     = rate_stack.shape[0] - 1
+    nodes       = list(range(num_n))
     other_nodes = [n for n in nodes if n != start_node]
 
-    prob = pulp.LpProblem(f"VRP_Oracle_{start_node}", pulp.LpMaximize)
+    # ── inner helpers ────────────────────────────────────────────────────────
 
-    x = pulp.LpVariable.dicts("Route", (nodes, nodes), 0, 1, pulp.LpBinary)
-    u = pulp.LpVariable.dicts("MTZ",   nodes, 1, num_n - 1, pulp.LpContinuous)
+    def _run_mip(oracle_r):
+        """Build and solve the MIP for one iteration; return (status_str, route|None)."""
+        prob = pulp.LpProblem(f"VRP_Oracle_{start_node}", pulp.LpMaximize)
+        x = pulp.LpVariable.dicts("Route", (nodes, nodes), 0, 1, pulp.LpBinary)
+        u = pulp.LpVariable.dicts("MTZ",   nodes, 1, num_n - 1, pulp.LpContinuous)
 
-    prob += pulp.lpSum(oracle_r[i][j] * x[i][j] for i in nodes for j in nodes if i != j)
+        prob += pulp.lpSum(
+            oracle_r[i][j] * x[i][j] for i in nodes for j in nodes if i != j
+        )
+        for k in nodes:
+            prob += (
+                pulp.lpSum(x[k][j] for j in nodes if k != j)
+                == pulp.lpSum(x[j][k] for j in nodes if k != j)
+            )
+            if k == start_node:
+                prob += pulp.lpSum(x[start_node][j] for j in nodes if j != start_node) == 1
+                prob += pulp.lpSum(x[j][start_node] for j in nodes if j != start_node) == 1
+            else:
+                prob += pulp.lpSum(x[j][k] for j in nodes if j != k) <= 1
 
-    for k in nodes:
-        prob += pulp.lpSum(x[k][j] for j in nodes if k != j) == pulp.lpSum(x[j][k] for j in nodes if k != j)
-        if k == start_node:
-            prob += pulp.lpSum(x[start_node][j] for j in nodes if j != start_node) == 1
-            prob += pulp.lpSum(x[j][start_node] for j in nodes if j != start_node) == 1
-        else:
-            prob += pulp.lpSum(x[j][k] for j in nodes if j != k) <= 1
+        total_time = pulp.lpSum(
+            time_matrix_np[i][j] * x[i][j] for i in nodes for j in nodes if i != j
+        )
+        prob += total_time <= max_d
 
-    # Duration uses real travel times, not oracle_r
-    total_time = pulp.lpSum(time_matrix_np[i][j] * x[i][j] for i in nodes for j in nodes if i != j)
-    prob += total_time <= max_d
+        for i in other_nodes:
+            prob += u[i] >= 1
+            for j in other_nodes:
+                if i != j:
+                    prob += u[i] - u[j] + 1 <= (num_n - 1) * (1 - x[i][j])
 
-    for i in other_nodes:
-        prob += u[i] >= 1
-        for j in other_nodes:
-            if i != j:
-                prob += u[i] - u[j] + 1 <= (num_n - 1) * (1 - x[i][j])
-
-    solver = pulp.PULP_CBC_CMD(msg=0)
-    prob.solve(solver)
-
-    status = pulp.LpStatus[prob.status]
-    route = None
-    total_reward = -np.inf
-    total_duration = np.inf
-
-    if status == 'Optimal':
-        total_reward = pulp.value(prob.objective)
-        total_duration = pulp.value(total_time)
+        pulp.PULP_CBC_CMD(msg=0).solve(prob)
+        status = pulp.LpStatus[prob.status]
+        if status != 'Optimal':
+            return status, None
 
         try:
-            current_node = start_node
+            cur = start_node
             route = [start_node]
-            visited_count = 0
-
-            while visited_count <= num_n:
-                found_next = False
+            for _ in range(num_n + 1):
+                moved = False
                 for j in nodes:
-                    if j != current_node and \
-                       x[current_node][j] is not None and \
-                       x[current_node][j].varValue is not None and \
-                       x[current_node][j].varValue > 0.99:
+                    v = x[cur][j].varValue if (x[cur][j] is not None
+                                               and x[cur][j].varValue is not None) else 0.0
+                    if j != cur and v > 0.99:
                         route.append(j)
-                        current_node = j
-                        found_next = True
+                        cur = j
+                        moved = True
                         break
-                visited_count += 1
-                if current_node == start_node:
+                if cur == start_node:
                     break
-                if not found_next:
-                    route = None
-                    break
-                if visited_count > num_n:
-                    route = None
-                    break
+                if not moved:
+                    return 'Error_In_Route', None
+            if route[0] != start_node or route[-1] != start_node:
+                return 'Error_In_Route', None
+            return status, route
+        except Exception as exc:
+            print(f"  [Oracle] route reconstruction error (start={start_node}): {exc}")
+            return 'Error_Exception', None
 
-            if route is None or route[0] != start_node or route[-1] != start_node:
-                route = None
-                total_reward = -np.inf
-                total_duration = np.inf
-                status = 'Error_In_Route'
-            else:
-                # Replace MIP objective (Dijkstra-day estimates) with the reward
-                # computed by walking the route with actual sequential arrival days,
-                # matching the evaluation used by DRL Real and RH-Greedy.
-                total_reward, total_duration = simulate_route_reward(
-                    route, start_node, start_day_idx,
-                    time_matrix_np, rate_stack, loads_stack, distance_arr, diesel_arr,
-                )
+    def _sequential_days(route):
+        """Return {node: real_arrival_day} for every node in route."""
+        days = {}
+        t = 0.0
+        for step in range(len(route) - 1):
+            i = route[step]
+            days[i] = min(start_day_idx + int(t // 14), max_day)
+            t += float(time_matrix_np[i][route[step + 1]])
+        days[route[-1]] = min(start_day_idx + int(t // 14), max_day)
+        return days
 
-        except Exception as e:
-            print(f"Exception during MIP-Oracle route reconstruction for start {start_node}: {e}")
-            route = None
-            total_reward = -np.inf
-            total_duration = np.inf
-            status = 'Error_Exception'
+    # ── initialise arrival_days with Dijkstra estimate ───────────────────────
 
-    if route is None:
-        total_reward = -np.inf
-        total_duration = np.inf
-        if status == 'Optimal':
-            status = 'Optimal_Route_Fail'
+    sparse_tm    = csr_matrix(time_matrix_np)
+    dist_m       = shortest_path(sparse_tm, method='D', directed=True, indices=start_node)
+    arrival_days = np.array([
+        min(start_day_idx + int(dist_m[i] // 14), max_day)
+        for i in range(num_n)
+    ], dtype=np.int32)
 
+    # ── iterative fixed-point loop ───────────────────────────────────────────
+
+    prev_route = None
+    status     = 'Infeasible'
+    route      = None
+
+    for _it in range(max_iter):
+        oracle_r       = _oracle_matrix_from_days(
+            arrival_days, start_node, rate_stack, loads_stack,
+            distance_arr, diesel_arr, start_day_idx, avail_prob_arr,
+            num_n, max_day,
+        )
+        status, route = _run_mip(oracle_r)
+
+        if route is None:
+            break
+
+        if route == prev_route:
+            # Fixed point reached: arrival_days already reflect this route.
+            break
+
+        # Refine arrival_days for every node on the route with real sequential
+        # days.  Nodes not on the route keep their current (Dijkstra) estimate.
+        for node, real_day in _sequential_days(route).items():
+            arrival_days[node] = real_day
+
+        prev_route = route
+
+    # ── final reward evaluation ──────────────────────────────────────────────
+
+    if route is None or len(route) < 2:
+        return status if status != 'Optimal' else 'Infeasible', None, -np.inf, np.inf
+
+    total_reward, total_duration = simulate_route_reward(
+        route, start_node, start_day_idx,
+        time_matrix_np, rate_stack, loads_stack, distance_arr, diesel_arr,
+        avail_prob_arr=avail_prob_arr,
+    )
     return status, route, total_reward, total_duration
 
 
@@ -1381,6 +1480,9 @@ def solve_heuristic_rolling_horizon(
             rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
         )
         return rm_pen
+
+    if hasattr(time_m, 'iloc'):
+        time_m = np.array(time_m, dtype=float)
 
     current_node = start_node
     time_elapsed = 0.0

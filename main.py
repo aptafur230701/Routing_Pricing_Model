@@ -113,10 +113,23 @@ def _evaluate_and_report(
         mask = results_df[valid_col]
         return results_df.loc[mask, col].mean() if mask.any() else float("nan")
 
-    drl_real_gap_oracle = results_df.loc[
-        results_df["Oracle Valid"] & results_df["DRL Real Valid"],
-        "Oracle Gap vs DRL Real (%)"
-    ].dropna()
+    def _gap_series(gap_col, solver_valid_col):
+        return results_df.loc[
+            results_df["Oracle Valid"] & results_df[solver_valid_col], gap_col
+        ].dropna()
+
+    drl_gap     = _gap_series("Oracle Gap vs DRL Real (%)",  "DRL Real Valid")
+    hga_gap     = _gap_series("Oracle Gap vs HGA-LNS (%)",   "HGA-LNS Valid")
+    rh_gap      = _gap_series("Oracle Gap vs RH-Greedy (%)", "RH-Greedy Valid")
+
+    def _gap_stats(series):
+        if len(series) > 0:
+            return series.mean(), series.max()
+        return float("nan"), float("nan")
+
+    drl_avg_gap, drl_max_gap = _gap_stats(drl_gap)
+    hga_avg_gap, hga_max_gap = _gap_stats(hga_gap)
+    rh_avg_gap,  rh_max_gap  = _gap_stats(rh_gap)
 
     print(f"\n{'='*60}")
     print(f"  SUMMARY — {NUM_NODES} nodes  [{label}]")
@@ -127,21 +140,32 @@ def _evaluate_and_report(
     print(f"  RH-Greedy avg reward   : {avg_valid('RH-Greedy Reward', 'RH-Greedy Valid'):.1f}")
     print(f"  Training time          : {train_time:.1f} s")
     print(f"  DRL Real avg inference : {np.mean(timing['drl_real_times'])*1000:.1f} ms")
+    print(f"  HGA-LNS avg inference  : {np.mean(timing['hga_lns_times'])*1000:.1f} ms")
+    print(f"  RH-Greedy avg inference: {np.mean(timing['rh_greedy_times'])*1000:.1f} ms")
     print(f"  Oracle avg inference   : {np.mean(timing['oracle_times'])*1000:.1f} ms")
-    if len(drl_real_gap_oracle) > 0:
-        print(f"  DRL Real avg gap vs Oracle: {drl_real_gap_oracle.mean():.2f}%")
-        print(f"  DRL Real max gap vs Oracle: {drl_real_gap_oracle.max():.2f}%")
+    print(f"  --- Gaps vs MIP-Oracle ---")
+    print(f"  DRL Real  : avg {drl_avg_gap:.2f}%  max {drl_max_gap:.2f}%")
+    print(f"  HGA-LNS   : avg {hga_avg_gap:.2f}%  max {hga_max_gap:.2f}%")
+    print(f"  RH-Greedy : avg {rh_avg_gap:.2f}%  max {rh_max_gap:.2f}%")
 
     summary_rows.append({
-        "Model":                          label,
-        "Node Size":                      NUM_NODES,
-        "Oracle Avg Reward":              avg_valid("Oracle Reward",    "Oracle Valid"),
-        "DRL Real Avg Reward":            avg_valid("DRL Real Reward",  "DRL Real Valid"),
-        "HGA-LNS Avg":                    avg_valid("HGA-LNS Reward",  "HGA-LNS Valid"),
-        "RH-Greedy Avg":                  avg_valid("RH-Greedy Reward", "RH-Greedy Valid"),
-        "DRL Training Time":              train_time,
-        "DRL Real Avg Gap vs Oracle (%)": drl_real_gap_oracle.mean() if len(drl_real_gap_oracle) > 0 else float("nan"),
-        "DRL Real Max Gap vs Oracle (%)": drl_real_gap_oracle.max()  if len(drl_real_gap_oracle) > 0 else float("nan"),
+        "Model":                           label,
+        "Node Size":                       NUM_NODES,
+        "Oracle Avg Reward":               avg_valid("Oracle Reward",    "Oracle Valid"),
+        "DRL Real Avg Reward":             avg_valid("DRL Real Reward",  "DRL Real Valid"),
+        "HGA-LNS Avg Reward":              avg_valid("HGA-LNS Reward",   "HGA-LNS Valid"),
+        "RH-Greedy Avg Reward":            avg_valid("RH-Greedy Reward", "RH-Greedy Valid"),
+        "DRL Training Time (s)":           train_time,
+        "DRL Real Avg Inference (ms)":     np.mean(timing["drl_real_times"]) * 1000,
+        "HGA-LNS Avg Inference (ms)":      np.mean(timing["hga_lns_times"])  * 1000,
+        "RH-Greedy Avg Inference (ms)":    np.mean(timing["rh_greedy_times"]) * 1000,
+        "Oracle Avg Inference (ms)":       np.mean(timing["oracle_times"])   * 1000,
+        "DRL Real Avg Gap vs Oracle (%)":  drl_avg_gap,
+        "DRL Real Max Gap vs Oracle (%)":  drl_max_gap,
+        "HGA-LNS Avg Gap vs Oracle (%)":   hga_avg_gap,
+        "HGA-LNS Max Gap vs Oracle (%)":   hga_max_gap,
+        "RH-Greedy Avg Gap vs Oracle (%)": rh_avg_gap,
+        "RH-Greedy Max Gap vs Oracle (%)": rh_max_gap,
     })
 
     excel_path = os.path.join(cwd, f"DRL_Routing_Summary_{label}.xlsx")

@@ -90,9 +90,6 @@ def run_solver_comparison(agent, time_matrix,
     for s in range(num_nodes):
         day_idx     = int(day_indices[s])
         abs_day_idx = TRAIN_DAYS + day_idx
-        _, reward_matrix_penalized = build_day_matrices(
-            rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
-        )
         print(f"\nStart node {s} | eval day {day_idx} (abs day {abs_day_idx})")
         row = {'Start Node': s, 'Eval Day Index': day_idx, 'Abs Day Index': abs_day_idx}
 
@@ -134,8 +131,12 @@ def run_solver_comparison(agent, time_matrix,
         # HGA-LNS
         t0 = time.time()
         hga_status, hga_route, hga_reward, hga_duration = solve_HGA_LNS_metaheuristic(
-            s, time_matrix, reward_matrix_penalized, MAX_DURATION, num_nodes,
-            seed=SEED + s)
+            s, time_matrix, MAX_DURATION, num_nodes,
+            rate_stack=rate_stack, loads_stack=loads_stack,
+            distance_arr=distance_arr, diesel_arr=diesel_arr,
+            start_day_idx=day_idx,
+            seed=SEED + s,
+        )
         hga_lns_times.append(time.time() - t0)
         row.update({
             'HGA-LNS Status':   hga_status,
