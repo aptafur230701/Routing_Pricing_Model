@@ -27,6 +27,7 @@ BIG_M_PENALTY          = -1e9
 
 # ── Evaluation ────────────────────────────────────────────────
 N_EVAL_EPISODES = 50
+N_DRL_REAL_SAMPLES = 5   # número de rollouts estocásticos en inferencia
 
 # ── AM Model architecture ─────────────────────────────────────
 AM_D_H      = 128  # Dimensión de embeddings del Transformer
@@ -38,11 +39,11 @@ AM_D_FF     = 512  # Dimensión de la capa feed-forward
 PPO_N_EPISODES_PER_UPDATE = 360    # Episodios recolectados antes de cada update PPO
 PPO_N_EPOCHS              = 4      # Épocas de entrenamiento PPO por rollout
 PPO_BATCH_SIZE            = 64     # Tamaño de batch para entrenamiento PPO
-PPO_LR                    = 3e-5   # Learning rate para el actor
+PPO_LR                    = 1e-5   # Learning rate para el actor
 PPO_GAMMA                 = 0.99   # Factor de descuento para las recompensas futuras
 PPO_GAE_LAMBDA            = 0.95   # Factor de GAE
 PPO_CLIP_EPS              = 0.15   # Clip PPO para limitar cambios de política
-PPO_ENTROPY_COEF          = 0.1   # Coeficiente de entropía para PPO
+PPO_ENTROPY_COEF          = 0.05   # Coeficiente de entropía para PPO
 PPO_GRAD_CLIP             = 0.5    # Clipping de gradiente para PPO
 
 # ── Train / eval split ───────────────────────────────────────
@@ -62,7 +63,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def get_episodes_per_node(num_nodes: int) -> int:
     """Episodes per start-node for the full training run."""
     if num_nodes <= 10:  return 5000
-    if num_nodes <= 20:  return 6000
+    if num_nodes <= 20:  return 9000
     if num_nodes <= 35:  return 6500
     if num_nodes <= 50:  return 7000
     if num_nodes <= 75:  return 7500
@@ -74,6 +75,7 @@ def get_beam_width(num_nodes: int) -> int:
     Modelos pequeños necesitan más exploración en inferencia.
     Modelos grandes tienen políticas más robustas y beam=1 es suficiente."""
     if num_nodes <= 10: return 5   # modelo pequeño, necesita más exploración
+    if num_nodes <= 20: return 5   # subido de 3 a 5
     if num_nodes <= 35: return 3   # balance costo/calidad
     return 1                       # modelo grande, confiar en la política
 

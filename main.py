@@ -259,8 +259,8 @@ def _evaluate_and_report(
 
 def main():
     # ── Cambia estos valores según lo que quieras hacer ───────────────────────
-    NUM_NODES  = 10     # opciones: 10 · 20 · 35 · 50 · 75 · 100
-    EVAL_ONLY  = True  # True: carga checkpoint y salta entrenamiento
+    NUM_NODES  = 20     # opciones: 10 · 20 · 35 · 50 · 75 · 100
+    EVAL_ONLY  = False  # True: carga checkpoint y salta entrenamiento
     # ──────────────────────────────────────────────────────────────────────────
 
     cwd          = os.path.dirname(os.path.abspath(__file__))

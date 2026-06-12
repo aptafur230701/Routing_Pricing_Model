@@ -1594,8 +1594,13 @@ def solve_mip_exact(
     # Must be ≥ max_d + max(time[i,j]) so that inactive arcs impose no
     # binding lower bound on arrival times of non-visited nodes.
     BIG_M_T = float(max_d) + float(time_matrix_np.max())
-    # BIG_M_D: big-M for day-boundary constraints (C6). Only needs ≥ max_d.
-    BIG_M_D = float(max_d)
+    # BIG_M_D: big-M for day-boundary constraints (C6).
+    # Must be ≥ max_d + 14*K_max so that the LP relaxation at B&B nodes where
+    # some x variables are fixed (and t[i] is forced by C4) never makes C6b
+    # spuriously binding below the C4-forced t value for fractional z.
+    # With BIG_M_D = max_d only, C6b: t[i] ≤ 14*(k+1) - EPS + max_d*(1-z)
+    # can force t[i] ≤ ~29h for z≈0.5 and k=0, invalidating the LP relaxation.
+    BIG_M_D = float(max_d) + 14.0 * K_max
     EPS     = 1e-6   # strict day-boundary upper bound (floor is left-closed)
 
     # Pre-compute deterministic reward matrices for each day offset (no Bernoulli)
