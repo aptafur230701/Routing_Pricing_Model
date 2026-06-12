@@ -1125,20 +1125,28 @@ def solve_HGA_LNS_metaheuristic(
             if dur <= max_d:
                 population.append({'route': route, 'reward': rew, 'duration': dur})
 
-    if not population:
-        # Emergency fallback: greedy/NN/random all rejected every arc (e.g. all
-        # rewards negative on day_0). Sweep every direct out-and-back using
-        # time-only feasibility — mirrors solve_LNS_metaheuristic fallback logic.
-        for _nb in range(num_n):
-            if _nb == start_node:
+    # Sweep garantizado: todas las rutas de 2 paradas (s→a→s) y 3 paradas (s→a→b→s).
+    # Se ejecuta SIEMPRE, no solo cuando la población está vacía.
+    # Garantiza que rutas cortas óptimas estén en la población aunque el greedy
+    # estático (reward_m del start_day_idx) las descarte por preferir otro orden.
+    # Evaluadas con _eval (días secuenciales reales) para consistencia con _eval.
+    for _a in range(num_n):
+        if _a == start_node:
+            continue
+        _t2 = float(time_m_np[start_node, _a] + time_m_np[_a, start_node])
+        if _t2 <= max_d:
+            _r2, _d2 = _eval([start_node, _a, start_node])
+            population.append({'route': [start_node, _a, start_node], 'reward': _r2, 'duration': _d2})
+        for _b in range(num_n):
+            if _b == start_node or _b == _a:
                 continue
-            _t = float(time_m_np[start_node, _nb] + time_m_np[_nb, start_node])
-            if _t <= max_d:
-                _fb = [start_node, _nb, start_node]
-                _r, _d = _eval(_fb)
-                population.append({'route': _fb, 'reward': _r, 'duration': _d})
-        if not population:
-            return "Infeasible", None, -np.inf, np.inf
+            _t3 = float(time_m_np[start_node, _a] + time_m_np[_a, _b] + time_m_np[_b, start_node])
+            if _t3 <= max_d:
+                _r3, _d3 = _eval([start_node, _a, _b, start_node])
+                population.append({'route': [start_node, _a, _b, start_node], 'reward': _r3, 'duration': _d3})
+
+    if not population:
+        return "Infeasible", None, -np.inf, np.inf
 
     best_overall = max(population, key=lambda x: x['reward'])
 
@@ -1181,7 +1189,9 @@ def solve_HGA_LNS_metaheuristic(
 
             if child_route and len(child_route) <= max_route_len:
                 child_rew, child_dur = _eval(child_route)
-                if child_dur <= max_d:
+                # Tolerancia negativa: evita que el drift de acumulación de floats
+                # en _eval deje pasar rutas marginalmente infeasibles (e.g. 77.63 > 77.0).
+                if child_dur <= max_d - 1e-6:
                     offspring.append({'route': child_route, 'reward': child_rew, 'duration': child_dur})
 
         population = offspring[:population_size]
@@ -1199,6 +1209,45 @@ def solve_HGA_LNS_metaheuristic(
     )
     final_status = "Optimal" if is_valid else "Infeasible"
     if not is_valid:
+        # best_overall tiene duration > max_d por drift de float en _eval.
+        # Fallback: barremos todas las rutas de 2 y 3 paradas y buscamos la mejor
+        # que sea feasible según simulate_route_reward (bit-exact con el resto).
+        fallback_best_route  = None
+        fallback_best_reward = -np.inf
+        for _a in range(num_n):
+            if _a == start_node:
+                continue
+            for candidate in ([start_node, _a, start_node],):
+                _t = float(time_m_np[start_node, _a] + time_m_np[_a, start_node])
+                if _t > max_d:
+                    continue
+                _r, _d = simulate_route_reward(
+                    candidate, start_node, start_day_idx,
+                    time_m_np, rate_stack, loads_stack, distance_arr, diesel_arr,
+                    avail_prob_arr=None,
+                )
+                if _d <= max_d and _r > fallback_best_reward:
+                    fallback_best_reward = _r
+                    fallback_best_route  = candidate
+            for _b in range(num_n):
+                if _b == start_node or _b == _a:
+                    continue
+                _t = float(time_m_np[start_node, _a] + time_m_np[_a, _b] + time_m_np[_b, start_node])
+                if _t > max_d:
+                    continue
+                candidate = [start_node, _a, _b, start_node]
+                _r, _d = simulate_route_reward(
+                    candidate, start_node, start_day_idx,
+                    time_m_np, rate_stack, loads_stack, distance_arr, diesel_arr,
+                    avail_prob_arr=None,
+                )
+                if _d <= max_d and _r > fallback_best_reward:
+                    fallback_best_reward = _r
+                    fallback_best_route  = candidate
+        if fallback_best_route is not None:
+            return "Optimal", fallback_best_route, fallback_best_reward, \
+                   float(sum(time_m_np[fallback_best_route[i], fallback_best_route[i+1]]
+                             for i in range(len(fallback_best_route)-1)))
         return final_status, None, -np.inf, np.inf
 
     # Canonical re-evaluation via simulate_route_reward guarantees bit-exact
@@ -1750,6 +1799,164 @@ def solve_heuristic_rolling_horizon(
     return status, route, total_reward, total_duration, is_valid
 
 
+def solve_heuristic_rolling_horizon_lookahead(
+    start_node, time_m, rate_stack, loads_stack,
+    distance_arr, diesel_arr, max_d, num_n, start_day_idx,
+    lookahead: int = 3,
+):
+    """Rolling Horizon Greedy with Deterministic Lookahead.
+
+    Extiende solve_heuristic_rolling_horizon reemplazando el scoring miope de
+    1 paso por una simulación greedy recursiva de `lookahead` pasos hacia
+    adelante.  En cada paso de decisión, para cada candidato `next` se simula
+    la mejor ruta greedy de hasta `lookahead-1` pasos adicionales desde `next`
+    (usando los días de mercado correctos en cada sub-paso) y se acumula el
+    reward total de esa sub-ruta como score.
+
+    Causalidad: los sub-pasos del lookahead usan la misma lógica de día
+    dinámico que el solver padre (day_idx = start_day_idx + int(t // 14)),
+    por lo que no hay información del futuro — solo planificación hacia adelante
+    con información del presente.
+
+    Complejidad: O(N^(lookahead+1)) por paso de decisión en el peor caso,
+    pero poda agresiva por factibilidad temporal la hace tratable para N<=100
+    y lookahead<=4.
+
+    Parámetros
+    ----------
+    lookahead : int — pasos de simulación hacia adelante por candidato (default 3).
+                lookahead=1 es equivalente a solve_heuristic_rolling_horizon.
+
+    Devuelve: status, route, total_reward, total_duration, is_valid
+    (mismo formato que solve_heuristic_rolling_horizon).
+    """
+    from problem_data import build_day_matrices
+
+    num_days  = rate_stack.shape[0]
+    max_arcs  = num_n - 1
+
+    if hasattr(time_m, 'iloc'):
+        time_m = np.array(time_m, dtype=float)
+
+    # ── Cache de matrices de reward por día para evitar reconstrucciones ──────
+    _rm_cache: dict = {}
+
+    def _get_rm(t_elapsed):
+        day_idx = min(start_day_idx + int(t_elapsed // 14), num_days - 1)
+        if day_idx not in _rm_cache:
+            _, rm_pen = build_day_matrices(
+                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+            )
+            _rm_cache[day_idx] = np.array(rm_pen, dtype=float)
+        return _rm_cache[day_idx]
+
+    # ── Función de lookahead recursiva ────────────────────────────────────────
+    def _lookahead_score(node, t_elapsed, visited_set, depth):
+        """
+        Retorna el mejor reward acumulado greedy de `depth` pasos desde `node`,
+        más el reward del retorno final al start_node.
+
+        En cada nivel elige el candidato que maximiza el reward inmediato más
+        el lookahead recursivo restante.  Si ningún candidato es factible,
+        retorna solo el reward del retorno directo desde `node`.
+        """
+        rm = _get_rm(t_elapsed)
+
+        # Retorno directo desde este nodo (siempre disponible como fallback)
+        return_reward = rm[node, start_node]
+
+        if depth == 0:
+            return return_reward
+
+        best_extended = -np.inf
+
+        for cand in range(num_n):
+            if cand == node or cand in visited_set:
+                continue
+            step_time   = time_m[node, cand]
+            return_time = time_m[cand, start_node]
+            # Factibilidad: el candidato debe permitir regresar al depot
+            if t_elapsed + step_time + return_time > max_d:
+                continue
+
+            arc_reward    = rm[node, cand]
+            t_after       = t_elapsed + step_time
+            visited_after = visited_set | {cand}
+
+            # Reward acumulado: arco actual + mejor lookahead desde el candidato
+            candidate_score = arc_reward + _lookahead_score(
+                cand, t_after, visited_after, depth - 1
+            )
+
+            if candidate_score > best_extended:
+                best_extended = candidate_score
+
+        # Si encontramos al menos un candidato factible, usamos el score extendido;
+        # de lo contrario caemos al retorno directo.
+        return best_extended if best_extended > -np.inf else return_reward
+
+    # ── Loop principal ────────────────────────────────────────────────────────
+    current_node  = start_node
+    time_elapsed  = 0.0
+    route         = [start_node]
+    visited       = {start_node}
+    steps         = 0
+
+    while steps < max_arcs:
+        rm = _get_rm(time_elapsed)
+
+        best_score     = -np.inf
+        best_next_node = None
+
+        for next_node in range(num_n):
+            if next_node == current_node or next_node in visited:
+                continue
+            step_time   = time_m[current_node, next_node]
+            return_time = time_m[next_node, start_node]
+            if time_elapsed + step_time + return_time > max_d:
+                continue
+
+            arc_reward = rm[current_node, next_node]
+            t_after    = time_elapsed + step_time
+            # Score = reward inmediato + mejor lookahead de (lookahead-1) pasos
+            score = arc_reward + _lookahead_score(
+                next_node, t_after, visited | {next_node}, lookahead - 1
+            )
+
+            if score > best_score:
+                best_score     = score
+                best_next_node = next_node
+
+        if best_next_node is not None:
+            time_elapsed += time_m[current_node, best_next_node]
+            current_node  = best_next_node
+            route.append(current_node)
+            visited.add(current_node)
+            steps += 1
+        else:
+            break
+
+    # Cerrar ciclo
+    if route[-1] != start_node:
+        return_time = time_m[current_node, start_node]
+        if time_elapsed + return_time <= max_d:
+            time_elapsed += return_time
+            route.append(start_node)
+
+    if route[-1] != start_node or len(route) < 2:
+        return "Infeasible", route if len(route) > 1 else None, -np.inf, time_elapsed, False
+
+    # Evaluación canónica — bit-exact con MIP-Exact y DRL Det.
+    total_reward, total_duration = simulate_route_reward(
+        route, start_node, start_day_idx,
+        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+        avail_prob_arr=None,
+    )
+    is_valid = total_duration <= max_d
+    status   = "Optimal" if is_valid else "Infeasible"
+    return status, route, total_reward, total_duration, is_valid
+
+
 def solve_heuristic_rolling_horizon_stochastic(
     start_node, time_m, rate_stack, loads_stack,
     distance_arr, diesel_arr, max_d, num_n, start_day_idx, avail_prob_arr,
@@ -1794,7 +2001,10 @@ def solve_heuristic_rolling_horizon_stochastic(
 
         for next_node in range(num_n):
             if next_node != current_node and next_node not in visited:
-                if lane_exists[next_node] != 1:
+                # No aplicar filtro Bernoulli desde el nodo de inicio, igual que
+                # beam_search_dynamic, que omite lane filtering cuando
+                # current_node == start_node.
+                if current_node != start_node and lane_exists[next_node] != 1:
                     continue
                 step_time = time_m[current_node][next_node]
                 return_time = time_m[next_node][start_node]

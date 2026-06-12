@@ -134,10 +134,11 @@ def _evaluate_and_report(
             results_df["MIP-Exact Valid"] & results_df[solver_valid_col], gap_col
         ].dropna()
 
-    drl_gap     = _gap_series("MIP-Exact Gap vs DRL Real (%)",  "DRL Real Valid")
-    drl_det_gap = _gap_series("MIP-Exact Gap vs DRL Det (%)",   "DRL Det Valid")
-    hga_gap     = _gap_series("MIP-Exact Gap vs HGA-LNS (%)",   "HGA-LNS Valid")
-    rh_gap      = _gap_series("MIP-Exact Gap vs RH-Greedy (%)", "RH-Greedy Valid")
+    drl_gap     = _gap_series("MIP-Exact Gap vs DRL Real (%)",      "DRL Real Valid")
+    drl_det_gap = _gap_series("MIP-Exact Gap vs DRL Det (%)",       "DRL Det Valid")
+    hga_gap     = _gap_series("MIP-Exact Gap vs HGA-LNS (%)",       "HGA-LNS Valid")
+    rh_gap      = _gap_series("MIP-Exact Gap vs RH-Greedy (%)",     "RH-Greedy Valid")
+    rhl_gap     = _gap_series("MIP-Exact Gap vs RH-Lookahead (%)",  "RH-Lookahead Valid")
 
     def _gap_stats(series):
         if len(series) > 0:
@@ -148,6 +149,7 @@ def _evaluate_and_report(
     drl_det_avg_gap, drl_det_max_gap = _gap_stats(drl_det_gap)
     hga_avg_gap,     hga_max_gap     = _gap_stats(hga_gap)
     rh_avg_gap,      rh_max_gap      = _gap_stats(rh_gap)
+    rhl_avg_gap,     rhl_max_gap     = _gap_stats(rhl_gap)
 
     both_valid = results_df["DRL Det Valid"] & results_df["DRL Real Valid"]
     real_vs_det_series = results_df.loc[both_valid].apply(
@@ -162,11 +164,6 @@ def _evaluate_and_report(
         if r["RH-Greedy Real Reward"] != 0 else float("nan"), axis=1
     ).dropna()
     drl_vs_rh_stoch_avg, _ = _gap_stats(drl_vs_rh_stoch_series)
-    # Promedios restringidos a la intersección — misma población que el gap
-    drl_real_on_both  = results_df.loc[drl_vs_rh_stoch_valid, "DRL Real Reward"].mean() \
-                        if drl_vs_rh_stoch_valid.any() else float("nan")
-    rh_stoch_on_both  = results_df.loc[drl_vs_rh_stoch_valid, "RH-Greedy Real Reward"].mean() \
-                        if drl_vs_rh_stoch_valid.any() else float("nan")
 
     drl_both_ms = np.mean(timing["drl_det_times"] + timing["drl_real_times"]) * 1000
 
@@ -176,19 +173,19 @@ def _evaluate_and_report(
     print(f"\n  Bloque 1 — Mundo determinista (comparación principal)")
     print(f"  MIP-Exact avg reward : {avg_valid('MIP-Exact Reward', 'MIP-Exact Valid'):>10.1f}  [cota superior]")
     print(f"  DRL Det avg reward   : {avg_valid('DRL Det Reward', 'DRL Det Valid'):>10.1f}  | gap vs MIP: avg {drl_det_avg_gap:.2f}%  max {drl_det_max_gap:.2f}%")
-    print(f"  HGA-LNS avg reward   : {avg_valid('HGA-LNS Reward', 'HGA-LNS Valid'):>10.1f}  | gap vs MIP: avg {hga_avg_gap:.2f}%  max {hga_max_gap:.2f}%")
-    print(f"  RH-Greedy avg reward : {avg_valid('RH-Greedy Reward', 'RH-Greedy Valid'):>10.1f}  | gap vs MIP: avg {rh_avg_gap:.2f}%  max {rh_max_gap:.2f}%")
-    print(f"\n  Bloque 2 — Costo de ejecución estocástica  (n ambos válidos={drl_vs_rh_stoch_valid.sum()})")
+    print(f"  HGA-LNS avg reward     : {avg_valid('HGA-LNS Reward', 'HGA-LNS Valid'):>10.1f}  | gap vs MIP: avg {hga_avg_gap:.2f}%  max {hga_max_gap:.2f}%")
+    print(f"  RH-Greedy avg reward   : {avg_valid('RH-Greedy Reward', 'RH-Greedy Valid'):>10.1f}  | gap vs MIP: avg {rh_avg_gap:.2f}%  max {rh_max_gap:.2f}%")
+    print(f"  RH-Lookahead avg reward: {avg_valid('RH-Lookahead Reward', 'RH-Lookahead Valid'):>10.1f}  | gap vs MIP: avg {rhl_avg_gap:.2f}%  max {rhl_max_gap:.2f}%")
+    print(f"\n  Bloque 2 — Costo de ejecución estocástica")
     print(f"  DRL Real avg reward      : {avg_valid('DRL Real Reward', 'DRL Real Valid'):>10.1f}  | gap vs DRL Det: avg ~{real_vs_det_avg:.1f}%")
     print(f"  RH-Greedy Real avg reward: {avg_valid('RH-Greedy Real Reward', 'RH-Greedy Real Valid'):>10.1f}")
-    print(f"  DRL Real reward          : {drl_real_on_both:>10.1f}")
-    print(f"  RH-Greedy Real reward    : {rh_stoch_on_both:>10.1f}")
     print(f"  DRL Real advantage vs RH-Greedy Real: avg ~{drl_vs_rh_stoch_avg:.1f}%")
     print(f"\n  Bloque 3 — Tiempo de inferencia")
     print(f"  DRL (Det+Real) : {drl_both_ms:>6.0f} ms")
     print(f"  HGA-LNS        : {np.mean(timing['hga_lns_times'])*1000:>6.0f} ms")
     print(f"  MIP-Exact      : {np.mean(timing['mip_exact_times'])*1000:>6.0f} ms")
     print(f"  RH-Greedy      : {np.mean(timing['rh_greedy_times'])*1000:>6.0f} ms")
+    print(f"  RH-Lookahead   : {np.mean(timing['rh_lookahead_times'])*1000:>6.0f} ms")
     print(f"  RH-Greedy Real : {np.mean(timing['rh_stoch_times'])*1000:>6.0f} ms")
     print(f"  Training time  : {train_time:.1f} s")
     print(f"{'='*60}")
@@ -200,10 +197,9 @@ def _evaluate_and_report(
         "MIP-Exact Avg Reward":            avg_valid("MIP-Exact Reward", "MIP-Exact Valid"),
         "DRL Real Avg Reward":             avg_valid("DRL Real Reward",  "DRL Real Valid"),
         "HGA-LNS Avg Reward":              avg_valid("HGA-LNS Reward",   "HGA-LNS Valid"),
-        "RH-Greedy Avg Reward":            avg_valid("RH-Greedy Reward", "RH-Greedy Valid"),
+        "RH-Greedy Avg Reward":            avg_valid("RH-Greedy Reward",    "RH-Greedy Valid"),
+        "RH-Lookahead Avg Reward":         avg_valid("RH-Lookahead Reward", "RH-Lookahead Valid"),
         "RH-Greedy Real Avg Reward":                avg_valid("RH-Greedy Real Reward", "RH-Greedy Real Valid"),
-        "DRL Real Avg Reward (intersección)":       drl_real_on_both,
-        "RH-Greedy Real Avg Reward (intersección)": rh_stoch_on_both,
         "DRL Real Advantage vs RH-Greedy Real (%)": drl_vs_rh_stoch_avg,
         "DRL Training Time (s)":           train_time,
         "DRL Real Avg Inference (ms)":     np.mean(timing["drl_real_times"]) * 1000,
@@ -214,8 +210,11 @@ def _evaluate_and_report(
         "DRL Real Max Gap vs MIP-Exact (%)":   drl_max_gap,
         "HGA-LNS Avg Gap vs MIP-Exact (%)":    hga_avg_gap,
         "HGA-LNS Max Gap vs MIP-Exact (%)":    hga_max_gap,
-        "RH-Greedy Avg Gap vs MIP-Exact (%)":  rh_avg_gap,
-        "RH-Greedy Max Gap vs MIP-Exact (%)":  rh_max_gap,
+        "RH-Greedy Avg Gap vs MIP-Exact (%)":      rh_avg_gap,
+        "RH-Greedy Max Gap vs MIP-Exact (%)":      rh_max_gap,
+        "RH-Lookahead Avg Gap vs MIP-Exact (%)":   rhl_avg_gap,
+        "RH-Lookahead Max Gap vs MIP-Exact (%)":   rhl_max_gap,
+        "RH-Lookahead Avg Inference (ms)":         np.mean(timing["rh_lookahead_times"]) * 1000,
     })
 
     excel_path = os.path.join(cwd, f"DRL_Routing_Summary_{label}.xlsx")
