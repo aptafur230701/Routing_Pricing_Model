@@ -2107,6 +2107,230 @@ def solve_heuristic_rolling_horizon_lookahead_stochastic(
     return status, route, total_reward, total_duration, is_valid
 
 
+def _rh_greedy_stoch_from_state(
+    current_node, time_elapsed, visited,
+    start_node, time_m, rate_stack, loads_stack,
+    distance_arr, diesel_arr, max_d, num_n, start_day_idx,
+    avail_prob_arr, seed=None,
+):
+    """Greedy estocástico desde un estado arbitrario (current_node, time_elapsed, visited).
+
+    Función auxiliar privada de solve_mc_rollout_stochastic. Replica la lógica de
+    solve_heuristic_rolling_horizon_stochastic pero arranca desde un estado intermedio
+    arbitrario en lugar de siempre desde (start_node, t=0, visited={start_node}).
+
+    Retorna el reward acumulado desde current_node hasta cerrar el ciclo en start_node,
+    usando el mismo filtrado Bernoulli y la misma lógica de día dinámico que el resto
+    del sistema. El parámetro seed está reservado para futuros usos; los sorteos
+    Bernoulli son siempre deterministas dado (start_day_idx, node, arrival_day).
+    """
+    from problem_data import build_day_matrices, draw_lane_availability
+
+    num_days = rate_stack.shape[0]
+    max_day = num_days - 1
+    max_arcs = num_n - 1
+
+    if hasattr(time_m, 'iloc'):
+        time_m = np.array(time_m, dtype=float)
+
+    _rm_cache: dict = {}
+
+    def _get_rm(t):
+        day_idx = min(start_day_idx + int(t // 14), max_day)
+        if day_idx not in _rm_cache:
+            _, rm_pen = build_day_matrices(
+                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+            )
+            _rm_cache[day_idx] = np.array(rm_pen, dtype=float)
+        return _rm_cache[day_idx]
+
+    node = current_node
+    t = float(time_elapsed)
+    vis = set(visited)
+    steps = len(vis) - 1  # nodes visited so far (excluding start_node)
+    total_reward = 0.0
+
+    while steps < max_arcs:
+        rm = _get_rm(t)
+        arrival_day = min(start_day_idx + int(t // 14), max_day)
+        lane_exists = draw_lane_availability(
+            start_day_idx, node=node, arrival_day=arrival_day,
+            avail_prob_arr=avail_prob_arr, num_nodes=num_n,
+        )
+
+        best_score = -np.inf
+        best_next = None
+
+        for nxt in range(num_n):
+            if nxt == node or nxt in vis:
+                continue
+            if node != start_node and lane_exists[nxt] != 1:
+                continue
+            step_t = float(time_m[node, nxt])
+            ret_t = float(time_m[nxt, start_node])
+            if t + step_t + ret_t <= max_d:
+                score = rm[node, nxt] + rm[nxt, start_node]
+                if score > best_score:
+                    best_score = score
+                    best_next = nxt
+
+        if best_next is not None:
+            total_reward += rm[node, best_next]
+            t += float(time_m[node, best_next])
+            node = best_next
+            vis.add(node)
+            steps += 1
+        else:
+            break
+
+    # Close cycle
+    if node != start_node:
+        ret_t = float(time_m[node, start_node])
+        if t + ret_t <= max_d:
+            total_reward += _get_rm(t)[node, start_node]
+
+    return total_reward
+
+
+def solve_mc_rollout_stochastic(
+    start_node, time_m, rate_stack, loads_stack,
+    distance_arr, diesel_arr, max_d, num_n, start_day_idx,
+    avail_prob_arr,
+    n_simulations=30,
+    lookahead_base_policy='rh_greedy',
+):
+    """Monte Carlo Rollout estocástico (VFA/policy rollout).
+
+    En cada paso de decisión estima el Q-value de cada acción candidata j
+    simulando n_simulations trayectorias completas desde el estado post-acción
+    (j, t + time[i,j], visited ∪ {j}) usando la política base greedy estocástica
+    (_rh_greedy_stoch_from_state). Selecciona la acción con mayor Q-value esperado.
+
+    **Garantía teórica (policy improvement)**
+    Por el teorema de mejora de política de Powell (Bertsekas & Castanon, 1999;
+    Secomandi, 2001), el rollout domina en esperanza a la política base:
+        V^rollout(s) ≥ V^base(s)  para todo estado s.
+    La garantía es en esperanza; no está garantizada sample-by-sample con n finito.
+
+    **Semillas de simulación**
+    Cada trayectoria k desde candidato j usa seed = (start_day_idx*9973 + j*97 + k)
+    & 0xFFFFFFFF para reproducibilidad. Los sorteos Bernoulli individuales de
+    draw_lane_availability son siempre deterministas dado (start_day_idx, node, arrival_day),
+    por lo que el seed controla solo el estado inicial del RNG de la política base.
+
+    Parameters
+    ----------
+    n_simulations : int — trayectorias por candidato (default 30). Reduce varianza
+                    de la estimación Q a costa de tiempo O(n_simulations * N).
+    lookahead_base_policy : str — política base usada ('rh_greedy').
+
+    Returns
+    -------
+    (status, route, total_reward, total_duration, is_valid)
+    Mismo formato que todos los solvers estocásticos del sistema.
+    reward recomputado con simulate_route_reward (evaluación canónica).
+    """
+    from problem_data import build_day_matrices, draw_lane_availability
+
+    if hasattr(time_m, 'iloc'):
+        time_m = np.array(time_m, dtype=float)
+
+    num_days = rate_stack.shape[0]
+    max_day = num_days - 1
+    max_arcs = num_n - 1
+
+    _rm_cache: dict = {}
+
+    def _get_rm(t):
+        day_idx = min(start_day_idx + int(t // 14), max_day)
+        if day_idx not in _rm_cache:
+            _, rm_pen = build_day_matrices(
+                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+            )
+            _rm_cache[day_idx] = np.array(rm_pen, dtype=float)
+        return _rm_cache[day_idx]
+
+    current_node = start_node
+    time_elapsed = 0.0
+    route = [start_node]
+    visited = {start_node}
+    steps = 0
+
+    while steps < max_arcs:
+        rm = _get_rm(time_elapsed)
+        arrival_day = min(start_day_idx + int(time_elapsed // 14), max_day)
+        lane_exists = draw_lane_availability(
+            start_day_idx, node=current_node, arrival_day=arrival_day,
+            avail_prob_arr=avail_prob_arr, num_nodes=num_n,
+        )
+
+        # Candidatos factibles en tiempo con lane disponible
+        candidates = []
+        for j in range(num_n):
+            if j == current_node or j in visited:
+                continue
+            if current_node != start_node and lane_exists[j] != 1:
+                continue
+            if (time_elapsed + float(time_m[current_node, j])
+                    + float(time_m[j, start_node]) <= max_d):
+                candidates.append(j)
+
+        if not candidates:
+            break
+
+        # Estimar Q-value para cada candidato via n_simulations trayectorias
+        best_q = -np.inf
+        best_j = None
+
+        for j in candidates:
+            imm_reward = rm[current_node, j]
+            t_after = time_elapsed + float(time_m[current_node, j])
+            visited_after = visited | {j}
+
+            future_rewards = []
+            for k in range(n_simulations):
+                seed = int((start_day_idx * 9973 + j * 97 + k) & 0xFFFFFFFF)
+                future_r = _rh_greedy_stoch_from_state(
+                    j, t_after, visited_after,
+                    start_node, time_m, rate_stack, loads_stack,
+                    distance_arr, diesel_arr, max_d, num_n, start_day_idx,
+                    avail_prob_arr, seed=seed,
+                )
+                future_rewards.append(future_r)
+
+            q_value = imm_reward + float(np.mean(future_rewards))
+
+            if q_value > best_q:
+                best_q = q_value
+                best_j = j
+
+        time_elapsed += float(time_m[current_node, best_j])
+        current_node = best_j
+        route.append(current_node)
+        visited.add(current_node)
+        steps += 1
+
+    # Cerrar ciclo
+    if route[-1] != start_node:
+        ret_t = float(time_m[current_node, start_node])
+        if time_elapsed + ret_t <= max_d:
+            time_elapsed += ret_t
+            route.append(start_node)
+
+    if route[-1] != start_node or len(route) < 2:
+        return "Infeasible", route if len(route) > 1 else None, -np.inf, time_elapsed, False
+
+    # Evaluación canónica final — no usar Q-values acumulados durante el rollout
+    total_reward, total_duration = simulate_route_reward(
+        route, start_node, start_day_idx,
+        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+        avail_prob_arr=avail_prob_arr,
+    )
+    is_valid = total_duration <= max_d
+    status = "Optimal" if is_valid else "Infeasible"
+    return status, route, total_reward, total_duration, is_valid
+
+
 def solve_heuristic_rolling_horizon_stochastic(
     start_node, time_m, rate_stack, loads_stack,
     distance_arr, diesel_arr, max_d, num_n, start_day_idx, avail_prob_arr,

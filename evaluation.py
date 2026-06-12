@@ -26,6 +26,7 @@ from Solvers import (
     solve_heuristic_rolling_horizon_lookahead,
     solve_heuristic_rolling_horizon_lookahead_stochastic,
     solve_heuristic_rolling_horizon_stochastic,
+    solve_mc_rollout_stochastic,
     solve_mip_exact,
     simulate_route_reward,
 )
@@ -93,6 +94,7 @@ def run_solver_comparison(agent, time_matrix,
     rh_lookahead_times = []
     rh_stoch_times   = []
     rh_lookahead_stoch_times = []
+    mc_rollout_times = []
     mip_exact_times  = []
     num_days         = rate_stack.shape[0]
 
@@ -226,6 +228,23 @@ def run_solver_comparison(agent, time_matrix,
         })
         print(f"  RH-Lookahead Real: {rhlr_route} | reward {rhlr_reward:.1f} (estocástico)")
 
+        # ── MC-Rollout estocástico ────────────────────────────────────────────
+        t0 = time.time()
+        mc_status, mc_route, mc_reward, mc_duration, mc_valid = \
+            solve_mc_rollout_stochastic(
+                s, time_matrix, rate_stack, loads_stack,
+                distance_arr, diesel_arr, MAX_DURATION, num_nodes,
+                start_day_idx=day_idx, avail_prob_arr=avail_prob_arr,
+            )
+        mc_rollout_times.append(time.time() - t0)
+        row.update({
+            'MC-Rollout Route':    mc_route,
+            'MC-Rollout Reward':   mc_reward if mc_valid else -np.inf,
+            'MC-Rollout Duration': mc_duration if mc_route else np.inf,
+            'MC-Rollout Valid':    mc_valid,
+        })
+        print(f"  MC-Rollout: {mc_route} | reward {mc_reward:.1f} (estocástico)")
+
         # ── HGA-LNS ──────────────────────────────────────────────────────────
         t0 = time.time()
         hga_status, hga_route, hga_reward, hga_duration = solve_HGA_LNS_metaheuristic(
@@ -277,11 +296,12 @@ def run_solver_comparison(agent, time_matrix,
                 return ((mip_reward - solver_r) / abs(mip_reward)) * 100
             return float('nan')
 
-        row['MIP-Exact Gap vs DRL Det (%)']      = mip_gap(row['DRL Det Reward'],      row['DRL Det Valid'])
-        row['MIP-Exact Gap vs DRL Real (%)']     = mip_gap(row['DRL Real Reward'],     row['DRL Real Valid'])
-        row['MIP-Exact Gap vs RH-Greedy (%)']    = mip_gap(row['RH-Greedy Reward'],    row['RH-Greedy Valid'])
-        row['MIP-Exact Gap vs RH-Lookahead (%)'] = mip_gap(row['RH-Lookahead Reward'], row['RH-Lookahead Valid'])
-        row['MIP-Exact Gap vs HGA-LNS (%)']      = mip_gap(row['HGA-LNS Reward'],      row['HGA-LNS Valid'])
+        row['MIP-Exact Gap vs DRL Det (%)']        = mip_gap(row['DRL Det Reward'],      row['DRL Det Valid'])
+        row['MIP-Exact Gap vs DRL Real (%)']       = mip_gap(row['DRL Real Reward'],     row['DRL Real Valid'])
+        row['MIP-Exact Gap vs RH-Greedy (%)']      = mip_gap(row['RH-Greedy Reward'],    row['RH-Greedy Valid'])
+        row['MIP-Exact Gap vs RH-Lookahead (%)']   = mip_gap(row['RH-Lookahead Reward'], row['RH-Lookahead Valid'])
+        row['MIP-Exact Gap vs HGA-LNS (%)']        = mip_gap(row['HGA-LNS Reward'],      row['HGA-LNS Valid'])
+        row['MIP-Exact Gap vs MC-Rollout (%)']     = mip_gap(row['MC-Rollout Reward'],   row['MC-Rollout Valid'])
 
         # Sanity check: MIP-Exact debe ser cota superior del DRL Det
         if (mip_valid and drl_det_valid
@@ -302,6 +322,7 @@ def run_solver_comparison(agent, time_matrix,
         'rh_lookahead_times':         rh_lookahead_times,
         'rh_stoch_times':             rh_stoch_times,
         'rh_lookahead_stoch_times':   rh_lookahead_stoch_times,
+        'mc_rollout_times':           mc_rollout_times,
         'mip_exact_times':   mip_exact_times,
     }
     return df, timing

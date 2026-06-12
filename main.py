@@ -139,6 +139,7 @@ def _evaluate_and_report(
     hga_gap     = _gap_series("MIP-Exact Gap vs HGA-LNS (%)",       "HGA-LNS Valid")
     rh_gap      = _gap_series("MIP-Exact Gap vs RH-Greedy (%)",     "RH-Greedy Valid")
     rhl_gap     = _gap_series("MIP-Exact Gap vs RH-Lookahead (%)",  "RH-Lookahead Valid")
+    mc_gap      = _gap_series("MIP-Exact Gap vs MC-Rollout (%)",    "MC-Rollout Valid")
 
     def _gap_stats(series):
         if len(series) > 0:
@@ -150,6 +151,7 @@ def _evaluate_and_report(
     hga_avg_gap,     hga_max_gap     = _gap_stats(hga_gap)
     rh_avg_gap,      rh_max_gap      = _gap_stats(rh_gap)
     rhl_avg_gap,     rhl_max_gap     = _gap_stats(rhl_gap)
+    mc_avg_gap,      mc_max_gap      = _gap_stats(mc_gap)
 
     both_valid = results_df["DRL Det Valid"] & results_df["DRL Real Valid"]
     real_vs_det_series = results_df.loc[both_valid].apply(
@@ -172,6 +174,13 @@ def _evaluate_and_report(
     ).dropna()
     drl_vs_rhlr_avg, _ = _gap_stats(drl_vs_rhlr_series)
 
+    drl_vs_mc_valid = results_df["DRL Real Valid"] & results_df["MC-Rollout Valid"]
+    drl_vs_mc_series = results_df.loc[drl_vs_mc_valid].apply(
+        lambda r: (r["DRL Real Reward"] - r["MC-Rollout Reward"]) / abs(r["MC-Rollout Reward"]) * 100
+        if r["MC-Rollout Reward"] != 0 else float("nan"), axis=1
+    ).dropna()
+    drl_vs_mc_avg, _ = _gap_stats(drl_vs_mc_series)
+
     drl_both_ms = np.mean(timing["drl_det_times"] + timing["drl_real_times"]) * 1000
 
     print(f"\n{'='*60}")
@@ -187,8 +196,10 @@ def _evaluate_and_report(
     print(f"  DRL Real avg reward      : {avg_valid('DRL Real Reward', 'DRL Real Valid'):>10.1f}  | gap vs DRL Det: avg ~{real_vs_det_avg:.1f}%")
     print(f"  RH-Greedy Real avg reward     : {avg_valid('RH-Greedy Real Reward', 'RH-Greedy Real Valid'):>10.1f}")
     print(f"  RH-Lookahead Real avg reward  : {avg_valid('RH-Lookahead Real Reward', 'RH-Lookahead Real Valid'):>10.1f}")
+    print(f"  MC-Rollout avg reward        : {avg_valid('MC-Rollout Reward', 'MC-Rollout Valid'):>10.1f}")
     print(f"  DRL Real advantage vs RH-Greedy Real:   avg ~{drl_vs_rh_stoch_avg:.1f}%")
     print(f"  DRL Real advantage vs RH-Lookahead Real: avg ~{drl_vs_rhlr_avg:.1f}%")
+    print(f"  DRL Real advantage vs MC-Rollout:        avg ~{drl_vs_mc_avg:.1f}%")
     print(f"\n  Bloque 3 — Tiempo de inferencia")
     print(f"  DRL (Det+Real) : {drl_both_ms:>6.0f} ms")
     print(f"  HGA-LNS        : {np.mean(timing['hga_lns_times'])*1000:>6.0f} ms")
@@ -197,6 +208,7 @@ def _evaluate_and_report(
     print(f"  RH-Lookahead   : {np.mean(timing['rh_lookahead_times'])*1000:>6.0f} ms")
     print(f"  RH-Greedy Real : {np.mean(timing['rh_stoch_times'])*1000:>6.0f} ms")
     print(f"  RH-Lookahead Real: {np.mean(timing['rh_lookahead_stoch_times'])*1000:>6.0f} ms")
+    print(f"  MC-Rollout       : {np.mean(timing['mc_rollout_times'])*1000:>6.0f} ms")
     print(f"  Training time  : {train_time:.1f} s")
     print(f"{'='*60}")
 
@@ -228,6 +240,11 @@ def _evaluate_and_report(
         "RH-Lookahead Max Gap vs MIP-Exact (%)":   rhl_max_gap,
         "RH-Lookahead Avg Inference (ms)":              np.mean(timing["rh_lookahead_times"]) * 1000,
         "RH-Lookahead Real Avg Inference (ms)":         np.mean(timing["rh_lookahead_stoch_times"]) * 1000,
+        "MC-Rollout Avg Reward":                         avg_valid("MC-Rollout Reward", "MC-Rollout Valid"),
+        "MC-Rollout Avg Gap vs MIP-Exact (%)":           mc_avg_gap,
+        "MC-Rollout Max Gap vs MIP-Exact (%)":           mc_max_gap,
+        "MC-Rollout Avg Inference (ms)":                 np.mean(timing["mc_rollout_times"]) * 1000,
+        "DRL Real Advantage vs MC-Rollout (%)":          drl_vs_mc_avg,
     })
 
     excel_path = os.path.join(cwd, f"DRL_Routing_Summary_{label}.xlsx")
