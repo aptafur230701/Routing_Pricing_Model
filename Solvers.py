@@ -1607,10 +1607,12 @@ def solve_mip_exact(
     R_det = {}
     for k in k_set:
         day = min(start_day_idx + k, max_day)
-        rm, _ = build_day_matrices(
+        _, rm = build_day_matrices(
             rate_stack[day], loads_stack[day], distance_arr, diesel_arr
         )
         R_det[k] = rm.to_numpy()   # shape (num_n, num_n), same as reward_matrix
+        np.fill_diagonal(R_det[k], 0.0) 
+
 
     # ── Build PuLP model ─────────────────────────────────────────────────────
     prob = pulp.LpProblem(f"MIP_Exact_{start_node}", pulp.LpMaximize)
@@ -1672,6 +1674,8 @@ def solve_mip_exact(
 
     # C6 – Day-slot boundaries: z[i,j,k]=1 ↔ t[i] ∈ [14k, 14(k+1))
     for i in nodes:
+        if i == start_node:
+            continue          # t[start_node]=0 fijado por C3, no necesita C6
         for j in nodes:
             if i == j:
                 continue
@@ -1680,7 +1684,8 @@ def solve_mip_exact(
                 prob += t[i] <= 14.0 * (k + 1) - EPS + BIG_M_D * (1 - z[(i, j, k)])
 
     # ── Solve ────────────────────────────────────────────────────────────────
-    pulp.PULP_CBC_CMD(msg=0, timeLimit=600).solve(prob)
+    #pulp.PULP_CBC_CMD(msg=0, timeLimit=600).solve(prob)
+    pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapAbs=0.0001).solve(prob)
 
     status = pulp.LpStatus[prob.status]
     if status != 'Optimal':
@@ -1718,6 +1723,36 @@ def solve_mip_exact(
         time_matrix_np, rate_stack, loads_stack, distance_arr, diesel_arr,
         avail_prob_arr=None,
     )
+
+    # ── Diagnóstico: detecta discrepancia entre objetivo MIP y reward re-evaluado
+    internal_obj = pulp.value(prob.objective)
+    if internal_obj is not None and abs(internal_obj - total_reward) > 1.0:
+        print(f"  [DIAG-FORMULACION] start={start_node} day={start_day_idx}: "
+              f"MIP interno={internal_obj:.1f}  simulate={total_reward:.1f}  "
+              f"diff={internal_obj - total_reward:.1f}  ruta={route}")
+    else:
+        print(f"  [DIAG-OK] start={start_node} day={start_day_idx}: "
+              f"MIP={total_reward:.1f}  ruta={route}")
+
+## Temporal, eliminar luego: diagnóstico específico para start_node=1, que es el caso donde detectamos la discrepancia entre MIP-Exact y DRL Det en la evaluación final.
+    if start_node == 1:
+        # Evalúa la ruta del DRL en el modelo MIP para ver por qué la rechaza
+        drl_route = [1, 15, 11, 13, 17, 1]
+        t_check = 0.0
+        print(f"  [CHECK] Evaluando ruta DRL {drl_route} en el MIP:")
+        for step in range(len(drl_route) - 1):
+            i, j = drl_route[step], drl_route[step+1]
+            k_sim = int(t_check // 14)          # día según simulate_route_reward
+            k_mip = min(k_sim, K_max)
+            r = float(R_det[k_mip][i, j]) if k_mip in R_det else 0.0
+            arc_t = float(time_matrix_np[i][j])
+            print(f"    arco {i}→{j}: t_salida={t_check:.2f}h  k={k_mip}  "
+                  f"reward={r:.1f}  arc_time={arc_t:.2f}h")
+            t_check += arc_t
+        total_t = t_check
+        print(f"    duración total: {total_t:.2f}h  (max_d={max_d:.2f}h)  "
+              f"factible: {total_t <= max_d}")
+
     return status, route, total_reward, total_duration
 
 
