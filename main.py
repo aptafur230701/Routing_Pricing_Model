@@ -16,7 +16,7 @@ Uso
     train-35nodes  →  NUM_NODES = 35
     train-50nodes  →  NUM_NODES = 50
     train-75nodes  →  NUM_NODES = 75
-    train-97nodes  →  NUM_NODES = 97
+    train-100nodes  →  NUM_NODES = 100
 
   Luego ejecuta simplemente:
     python main.py
@@ -165,6 +165,13 @@ def _evaluate_and_report(
     ).dropna()
     drl_vs_rh_stoch_avg, _ = _gap_stats(drl_vs_rh_stoch_series)
 
+    drl_vs_rhlr_valid = results_df["DRL Real Valid"] & results_df["RH-Lookahead Real Valid"]
+    drl_vs_rhlr_series = results_df.loc[drl_vs_rhlr_valid].apply(
+        lambda r: (r["DRL Real Reward"] - r["RH-Lookahead Real Reward"]) / abs(r["RH-Lookahead Real Reward"]) * 100
+        if r["RH-Lookahead Real Reward"] != 0 else float("nan"), axis=1
+    ).dropna()
+    drl_vs_rhlr_avg, _ = _gap_stats(drl_vs_rhlr_series)
+
     drl_both_ms = np.mean(timing["drl_det_times"] + timing["drl_real_times"]) * 1000
 
     print(f"\n{'='*60}")
@@ -178,8 +185,10 @@ def _evaluate_and_report(
     print(f"  RH-Lookahead avg reward: {avg_valid('RH-Lookahead Reward', 'RH-Lookahead Valid'):>10.1f}  | gap vs MIP: avg {rhl_avg_gap:.2f}%  max {rhl_max_gap:.2f}%")
     print(f"\n  Bloque 2 — Costo de ejecución estocástica")
     print(f"  DRL Real avg reward      : {avg_valid('DRL Real Reward', 'DRL Real Valid'):>10.1f}  | gap vs DRL Det: avg ~{real_vs_det_avg:.1f}%")
-    print(f"  RH-Greedy Real avg reward: {avg_valid('RH-Greedy Real Reward', 'RH-Greedy Real Valid'):>10.1f}")
-    print(f"  DRL Real advantage vs RH-Greedy Real: avg ~{drl_vs_rh_stoch_avg:.1f}%")
+    print(f"  RH-Greedy Real avg reward     : {avg_valid('RH-Greedy Real Reward', 'RH-Greedy Real Valid'):>10.1f}")
+    print(f"  RH-Lookahead Real avg reward  : {avg_valid('RH-Lookahead Real Reward', 'RH-Lookahead Real Valid'):>10.1f}")
+    print(f"  DRL Real advantage vs RH-Greedy Real:   avg ~{drl_vs_rh_stoch_avg:.1f}%")
+    print(f"  DRL Real advantage vs RH-Lookahead Real: avg ~{drl_vs_rhlr_avg:.1f}%")
     print(f"\n  Bloque 3 — Tiempo de inferencia")
     print(f"  DRL (Det+Real) : {drl_both_ms:>6.0f} ms")
     print(f"  HGA-LNS        : {np.mean(timing['hga_lns_times'])*1000:>6.0f} ms")
@@ -187,6 +196,7 @@ def _evaluate_and_report(
     print(f"  RH-Greedy      : {np.mean(timing['rh_greedy_times'])*1000:>6.0f} ms")
     print(f"  RH-Lookahead   : {np.mean(timing['rh_lookahead_times'])*1000:>6.0f} ms")
     print(f"  RH-Greedy Real : {np.mean(timing['rh_stoch_times'])*1000:>6.0f} ms")
+    print(f"  RH-Lookahead Real: {np.mean(timing['rh_lookahead_stoch_times'])*1000:>6.0f} ms")
     print(f"  Training time  : {train_time:.1f} s")
     print(f"{'='*60}")
 
@@ -199,8 +209,10 @@ def _evaluate_and_report(
         "HGA-LNS Avg Reward":              avg_valid("HGA-LNS Reward",   "HGA-LNS Valid"),
         "RH-Greedy Avg Reward":            avg_valid("RH-Greedy Reward",    "RH-Greedy Valid"),
         "RH-Lookahead Avg Reward":         avg_valid("RH-Lookahead Reward", "RH-Lookahead Valid"),
-        "RH-Greedy Real Avg Reward":                avg_valid("RH-Greedy Real Reward", "RH-Greedy Real Valid"),
-        "DRL Real Advantage vs RH-Greedy Real (%)": drl_vs_rh_stoch_avg,
+        "RH-Greedy Real Avg Reward":                    avg_valid("RH-Greedy Real Reward",    "RH-Greedy Real Valid"),
+        "RH-Lookahead Real Avg Reward":                 avg_valid("RH-Lookahead Real Reward", "RH-Lookahead Real Valid"),
+        "DRL Real Advantage vs RH-Greedy Real (%)":     drl_vs_rh_stoch_avg,
+        "DRL Real Advantage vs RH-Lookahead Real (%)":  drl_vs_rhlr_avg,
         "DRL Training Time (s)":           train_time,
         "DRL Real Avg Inference (ms)":     np.mean(timing["drl_real_times"]) * 1000,
         "HGA-LNS Avg Inference (ms)":      np.mean(timing["hga_lns_times"])  * 1000,
@@ -214,7 +226,8 @@ def _evaluate_and_report(
         "RH-Greedy Max Gap vs MIP-Exact (%)":      rh_max_gap,
         "RH-Lookahead Avg Gap vs MIP-Exact (%)":   rhl_avg_gap,
         "RH-Lookahead Max Gap vs MIP-Exact (%)":   rhl_max_gap,
-        "RH-Lookahead Avg Inference (ms)":         np.mean(timing["rh_lookahead_times"]) * 1000,
+        "RH-Lookahead Avg Inference (ms)":              np.mean(timing["rh_lookahead_times"]) * 1000,
+        "RH-Lookahead Real Avg Inference (ms)":         np.mean(timing["rh_lookahead_stoch_times"]) * 1000,
     })
 
     excel_path = os.path.join(cwd, f"DRL_Routing_Summary_{label}.xlsx")
@@ -229,7 +242,7 @@ def _evaluate_and_report(
 
 def main():
     # ── Cambia estos valores según lo que quieras hacer ───────────────────────
-    NUM_NODES  = 10     # opciones: 10 · 20 · 35 · 50 · 75 · 97
+    NUM_NODES  = 10     # opciones: 10 · 20 · 35 · 50 · 75 · 100
     EVAL_ONLY  = True  # True: carga checkpoint y salta entrenamiento
     # ──────────────────────────────────────────────────────────────────────────
 

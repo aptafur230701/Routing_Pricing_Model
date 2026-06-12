@@ -1957,6 +1957,156 @@ def solve_heuristic_rolling_horizon_lookahead(
     return status, route, total_reward, total_duration, is_valid
 
 
+def solve_heuristic_rolling_horizon_lookahead_stochastic(
+    start_node, time_m, rate_stack, loads_stack,
+    distance_arr, diesel_arr, max_d, num_n, start_day_idx,
+    avail_prob_arr,
+    lookahead=3,
+):
+    """Extensión estocástica de solve_heuristic_rolling_horizon_lookahead.
+
+    Reemplaza el scoring determinista de cada sub-paso del lookahead por sorteos
+    Bernoulli con las mismas semillas que el resto del sistema: en cada nivel de
+    recursión se llama a draw_lane_availability con seed basada en
+    (start_day_idx, node, arrival_day), exactamente igual que
+    solve_heuristic_rolling_horizon_stochastic y RoutingEnv.
+
+    La evaluación final usa simulate_route_reward(..., avail_prob_arr=avail_prob_arr)
+    para garantizar paridad bit-exact con DRL Real y RH-Greedy Real.
+
+    Con lookahead=1 la función es idéntica a solve_heuristic_rolling_horizon_stochastic.
+    """
+    from problem_data import build_day_matrices, draw_lane_availability
+
+    num_days = rate_stack.shape[0]
+    max_day  = num_days - 1
+    max_arcs = num_n - 1
+
+    if hasattr(time_m, 'iloc'):
+        time_m = np.array(time_m, dtype=float)
+
+    # Cache de matrices de reward por día para evitar reconstrucciones
+    _rm_cache: dict = {}
+
+    def _get_rm(t_elapsed):
+        day_idx = min(start_day_idx + int(t_elapsed // 14), max_day)
+        if day_idx not in _rm_cache:
+            _, rm_pen = build_day_matrices(
+                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+            )
+            _rm_cache[day_idx] = np.array(rm_pen, dtype=float)
+        return _rm_cache[day_idx]
+
+    def _lookahead_score(node, t_elapsed, visited_set, depth):
+        """
+        Mejor reward acumulado greedy (con filtrado Bernoulli) de `depth` pasos
+        desde `node`.  Retorna el reward del retorno directo si ningún candidato
+        es factible o depth==0.
+        """
+        rm = _get_rm(t_elapsed)
+        return_reward = rm[node, start_node]
+
+        if depth == 0:
+            return return_reward
+
+        arrival_day = min(start_day_idx + int(t_elapsed // 14), max_day)
+        lane_exists = draw_lane_availability(
+            start_day_idx, node=node, arrival_day=arrival_day,
+            avail_prob_arr=avail_prob_arr, num_nodes=num_n,
+        )
+
+        best_extended = -np.inf
+
+        for cand in range(num_n):
+            if cand == node or cand in visited_set:
+                continue
+            # Filtro Bernoulli — se omite cuando salimos desde start_node,
+            # consistente con solve_heuristic_rolling_horizon_stochastic.
+            if node != start_node and lane_exists[cand] != 1:
+                continue
+            step_time   = time_m[node, cand]
+            return_time = time_m[cand, start_node]
+            if t_elapsed + step_time + return_time > max_d:
+                continue
+
+            arc_reward    = rm[node, cand]
+            t_after       = t_elapsed + step_time
+            candidate_score = arc_reward + _lookahead_score(
+                cand, t_after, visited_set | {cand}, depth - 1
+            )
+
+            if candidate_score > best_extended:
+                best_extended = candidate_score
+
+        return best_extended if best_extended > -np.inf else return_reward
+
+    # ── Loop principal ────────────────────────────────────────────────────────
+    current_node = start_node
+    time_elapsed = 0.0
+    route        = [start_node]
+    visited      = {start_node}
+    steps        = 0
+
+    while steps < max_arcs:
+        rm = _get_rm(time_elapsed)
+        arrival_day = min(start_day_idx + int(time_elapsed // 14), max_day)
+        lane_exists = draw_lane_availability(
+            start_day_idx, node=current_node, arrival_day=arrival_day,
+            avail_prob_arr=avail_prob_arr, num_nodes=num_n,
+        )
+
+        best_score     = -np.inf
+        best_next_node = None
+
+        for next_node in range(num_n):
+            if next_node == current_node or next_node in visited:
+                continue
+            if current_node != start_node and lane_exists[next_node] != 1:
+                continue
+            step_time   = time_m[current_node, next_node]
+            return_time = time_m[next_node, start_node]
+            if time_elapsed + step_time + return_time > max_d:
+                continue
+
+            arc_reward = rm[current_node, next_node]
+            t_after    = time_elapsed + step_time
+            score = arc_reward + _lookahead_score(
+                next_node, t_after, visited | {next_node}, lookahead - 1
+            )
+
+            if score > best_score:
+                best_score     = score
+                best_next_node = next_node
+
+        if best_next_node is not None:
+            time_elapsed += time_m[current_node, best_next_node]
+            current_node  = best_next_node
+            route.append(current_node)
+            visited.add(current_node)
+            steps += 1
+        else:
+            break
+
+    # Cerrar ciclo
+    if route[-1] != start_node:
+        return_time = time_m[current_node, start_node]
+        if time_elapsed + return_time <= max_d:
+            time_elapsed += return_time
+            route.append(start_node)
+
+    if route[-1] != start_node or len(route) < 2:
+        return "Infeasible", route if len(route) > 1 else None, -np.inf, time_elapsed, False
+
+    total_reward, total_duration = simulate_route_reward(
+        route, start_node, start_day_idx,
+        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+        avail_prob_arr=avail_prob_arr,
+    )
+    is_valid = total_duration <= max_d
+    status   = "Optimal" if is_valid else "Infeasible"
+    return status, route, total_reward, total_duration, is_valid
+
+
 def solve_heuristic_rolling_horizon_stochastic(
     start_node, time_m, rate_stack, loads_stack,
     distance_arr, diesel_arr, max_d, num_n, start_day_idx, avail_prob_arr,

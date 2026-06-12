@@ -24,6 +24,7 @@ from Solvers import (
     solve_HGA_LNS_metaheuristic,
     solve_heuristic_rolling_horizon,
     solve_heuristic_rolling_horizon_lookahead,
+    solve_heuristic_rolling_horizon_lookahead_stochastic,
     solve_heuristic_rolling_horizon_stochastic,
     solve_mip_exact,
     simulate_route_reward,
@@ -91,6 +92,7 @@ def run_solver_comparison(agent, time_matrix,
     rh_greedy_times  = []
     rh_lookahead_times = []
     rh_stoch_times   = []
+    rh_lookahead_stoch_times = []
     mip_exact_times  = []
     num_days         = rate_stack.shape[0]
 
@@ -207,6 +209,23 @@ def run_solver_comparison(agent, time_matrix,
         })
         print(f"  RH-Greedy Real: {rh_stoch_route} | reward {rh_stoch_reward:.1f} (estocástico)")
 
+        # ── RH-Lookahead Real — lookahead en mundo estocástico ────────────────
+        t0 = time.time()
+        rhlr_status, rhlr_route, rhlr_reward, rhlr_duration, rhlr_valid = \
+            solve_heuristic_rolling_horizon_lookahead_stochastic(
+                s, time_matrix, rate_stack, loads_stack,
+                distance_arr, diesel_arr, MAX_DURATION, num_nodes,
+                start_day_idx=day_idx, avail_prob_arr=avail_prob_arr, lookahead=3,
+            )
+        rh_lookahead_stoch_times.append(time.time() - t0)
+        row.update({
+            'RH-Lookahead Real Route':    rhlr_route,
+            'RH-Lookahead Real Reward':   rhlr_reward if rhlr_valid else -np.inf,
+            'RH-Lookahead Real Duration': rhlr_duration if rhlr_route else np.inf,
+            'RH-Lookahead Real Valid':    rhlr_valid,
+        })
+        print(f"  RH-Lookahead Real: {rhlr_route} | reward {rhlr_reward:.1f} (estocástico)")
+
         # ── HGA-LNS ──────────────────────────────────────────────────────────
         t0 = time.time()
         hga_status, hga_route, hga_reward, hga_duration = solve_HGA_LNS_metaheuristic(
@@ -279,9 +298,10 @@ def run_solver_comparison(agent, time_matrix,
         'drl_real_times':    drl_real_times,
         'drl_det_times':     drl_det_times,
         'hga_lns_times':     hga_lns_times,
-        'rh_greedy_times':   rh_greedy_times,
-        'rh_lookahead_times': rh_lookahead_times,
-        'rh_stoch_times':    rh_stoch_times,
+        'rh_greedy_times':            rh_greedy_times,
+        'rh_lookahead_times':         rh_lookahead_times,
+        'rh_stoch_times':             rh_stoch_times,
+        'rh_lookahead_stoch_times':   rh_lookahead_stoch_times,
         'mip_exact_times':   mip_exact_times,
     }
     return df, timing
