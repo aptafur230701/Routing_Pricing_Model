@@ -1,245 +1,199 @@
 import numpy as np
-import pandas as pd
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-from torch.distributions import Categorical # For sampling actions
-import matplotlib.pyplot as plt
-import pulp
+from collections import namedtuple
+
+# ── Constantes de dominio (antes números mágicos dispersos por el archivo) ────
+DAYS_PER_PERIOD = 14            # día de mercado:  day_idx = start + int(t // 14)
+TIME_EPS = 1e-6                 # tolerancia de holgura temporal
+INSERTION_TIME_PENALTY = 1e-3  # peso del castigo por tiempo en la inserción LNS
+_BERNOULLI_SEED_A = 9973       # constantes de semilla del MC rollout
+_BERNOULLI_SEED_B = 97
+
+# torch y pulp se importan de forma PEREZOSA dentro de las únicas funciones que
+# los usan (generate_optimal_route_pytorch y solve_lp_relaxation), de modo que
+# importar Solvers no arrastre dependencias pesadas/opcionales.
+
+# ── Tipos de resultado (namedtuple = 100% compatible con desempaquetado por
+#    tupla, así que los llamadores existentes siguen funcionando sin cambios) ──
+RHResult = namedtuple("RHResult", "status route reward duration is_valid")
+MetaResult = namedtuple("MetaResult", "status route reward duration")
+RewardResult = namedtuple("RewardResult", "reward duration")
 
 
-def generate_optimal_route_pytorch(agent, start_node, time_matrix, reward_matrix, NUM_NODES,MAX_DURATION,MAX_STEPS_PER_EPISODE):
-        """
-        Generates a route using the learned policy (greedy selection),
-        preventing revisits to intermediate nodes.
-        If max_steps is reached, attempts forced return if valid.
-        Validates final duration window.
-        """
-        max_steps=MAX_STEPS_PER_EPISODE
-        agent.epsilon = 0
-        agent.policy_net.eval()
-        current_node = start_node
-        time_elapsed = 0.0
-        state = np.array([current_node, time_elapsed / MAX_DURATION], dtype=np.float32)
-        route = [start_node]
-        visited_intermediate_nodes = set() # Keep track of nodes visited *other than* start_node
-        total_reward = 0.0
-        returned_home = False
+def _day_index(start_day_idx, time_elapsed, max_day):
+    """Índice de día de mercado para un tiempo transcurrido (lógica única
+    replicada antes en cada solver)."""
+    return min(start_day_idx + int(time_elapsed // DAYS_PER_PERIOD), max_day)
 
+
+def _make_rm_cache(rate_stack, loads_stack, distance_arr, diesel_arr,
+                   start_day_idx, max_day, as_numpy=True):
+    """Devuelve un closure get_rm(t) que construye y cachea (por llamada) la
+    matriz de reward del día correspondiente a `t`.
+
+    as_numpy=True  → np.ndarray (acceso rm[i, j]); usado por la familia lookahead,
+                     stochastic y el rollout.
+    as_numpy=False → pd.DataFrame (acceso rm[i][j] / rm.iloc[i, j]); usado por
+                     solve_heuristic_rolling_horizon(_stochastic) y
+                     simulate_route_reward, que dependen de ese tipo/indexación.
+
+    Centraliza el patrón `_get_rm` que estaba duplicado ~6 veces. NO cambia qué
+    matriz ve cada llamador ni cómo la indexa: solo unifica construcción y caché.
+    """
+    from problem_data import build_day_matrices
+    cache = {}
+
+    def get_rm(time_elapsed):
+        day_idx = _day_index(start_day_idx, time_elapsed, max_day)
+        if day_idx not in cache:
+            _, rm_pen = build_day_matrices(
+                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+            )
+            cache[day_idx] = np.array(rm_pen, dtype=float) if as_numpy else rm_pen
+        return cache[day_idx]
+
+    return get_rm
+
+
+def _close_cycle_and_finalize(route, current_node, time_elapsed, start_node,
+                              time_m, max_d, start_day_idx,
+                              rate_stack, loads_stack, distance_arr, diesel_arr,
+                              avail_prob_arr):
+    """Cierra el ciclo (regreso al depósito si es factible en tiempo), valida y
+    re-evalúa el reward de forma canónica con simulate_route_reward.
+
+    Captura el bloque-cola idéntico que estaba copiado en las 5 funciones de la
+    familia rolling-horizon + MC rollout. `time_m` ya es np.ndarray en todas, por
+    lo que time_m[a, b] reproduce exactamente el acceso previo (sea [a][b] o [a,b]).
+
+    Devuelve un RHResult (status, route, reward, duration, is_valid).
+    """
+    if route[-1] != start_node:
+        return_time = float(time_m[current_node, start_node])
+        if time_elapsed + return_time <= max_d:
+            time_elapsed += return_time
+            route.append(start_node)
+
+    if route[-1] != start_node or len(route) < 2:
+        return RHResult("Infeasible", route if len(route) > 1 else None,
+                        -np.inf, time_elapsed, False)
+
+    total_reward, total_duration = simulate_route_reward(
+        route, start_node, start_day_idx,
+        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+        avail_prob_arr=avail_prob_arr,
+    )
+    is_valid = total_duration <= max_d
+    status = "Optimal" if is_valid else "Infeasible"
+    return RHResult(status, route, total_reward, total_duration, is_valid)
+
+
+def generate_optimal_route_pytorch(agent, start_node, time_matrix, reward_matrix,
+                                   NUM_NODES, MAX_DURATION, MAX_STEPS_PER_EPISODE):
+    """Genera una ruta con la política aprendida (selección greedy), evitando
+    revisitar nodos intermedios. Si se alcanza max_steps intenta el regreso
+    forzado si es factible, y valida la ventana de duración final.
+
+    Devuelve (route, total_reward, time_elapsed) si forma un ciclo válido, o
+    (None, -inf, inf) si no logra cerrar el ciclo.
+    """
+    import torch  # import perezoso: única función del módulo que usa torch
+
+    max_steps = MAX_STEPS_PER_EPISODE
+    agent.epsilon = 0
+    agent.policy_net.eval()
+    current_node = start_node
+    time_elapsed = 0.0
+    state = np.array([current_node, time_elapsed / MAX_DURATION], dtype=np.float32)
+    route = [start_node]
+    visited_intermediate_nodes = set()  # nodos visitados distintos de start_node
+    total_reward = 0.0
+    returned_home = False
+
+    try:
         with torch.no_grad():
             for step in range(max_steps):
-                # --- Action Selection ---
+                # --- Selección de acción ---
                 state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(agent.device)
                 q_values = agent.policy_net(state_tensor)
                 q_values_numpy = q_values.cpu().data.numpy()[0]
 
-                # --- Masking Invalid Actions ---
-                # 1. Don't stay in the same node
-                q_values_numpy[current_node] = -np.inf
-
-                # 2. Don't visit intermediate nodes already visited
+                # --- Enmascarar acciones inválidas ---
+                q_values_numpy[current_node] = -np.inf  # no quedarse en el mismo nodo
                 for visited_node_idx in visited_intermediate_nodes:
-                    if 0 <= visited_node_idx < len(q_values_numpy): # Bounds check
+                    if 0 <= visited_node_idx < len(q_values_numpy):
                         q_values_numpy[visited_node_idx] = -np.inf
 
-                # --- Choose Best Valid Action ---
+                # --- Mejor acción válida ---
                 next_node = np.argmax(q_values_numpy)
 
-                # Check if any valid action exists
+                # ¿existe alguna acción válida?
                 if q_values_numpy[next_node] == -np.inf:
-                    # No valid moves possible (maybe all unvisited nodes violate time or Q-values are terrible)
-                    # Try forcing return home immediately if possible
-                    # print(f"DRL: Stuck at node {current_node}. No valid non-visited moves. Trying return home.")
+                    # Sin movimientos válidos: intentar regreso forzado al depósito.
                     if current_node != start_node:
                         return_time = time_matrix[current_node][start_node]
-                        if time_elapsed + return_time <= MAX_DURATION + 1e-6:
-                            next_node = start_node # Override choice to return home
-                            # print("DRL: Forcing return home as only option.")
+                        if time_elapsed + return_time <= MAX_DURATION + TIME_EPS:
+                            next_node = start_node  # forzar regreso
                         else:
-                            # print(f"DRL Error: Stuck at node {current_node}. Cannot return home within duration.")
                             returned_home = False
-                            break # Cannot proceed
-                    else: # Stuck at start node? Should not happen if mask works.
+                            break  # no se puede continuar
+                    else:  # atascado en el depósito (no debería pasar con el masking)
                         returned_home = False
                         break
 
-
-                # --- Simulate Step ---
+                # --- Simular paso ---
                 step_time = time_matrix[current_node][next_node]
                 step_reward = reward_matrix[current_node][next_node]
 
-                # --- Check immediate time violation (should be less likely now with stuck check) ---
-                if time_elapsed + step_time > MAX_DURATION + 1e-6 and next_node != start_node:
-                    # print(f"DRL: Next step to {next_node} violates MAX_DURATION. Stopping.")
+                # --- Violación inmediata de tiempo ---
+                if time_elapsed + step_time > MAX_DURATION + TIME_EPS and next_node != start_node:
                     returned_home = False
                     break
 
-                # --- Update State ---
+                # --- Actualizar estado ---
                 time_elapsed += step_time
                 total_reward += step_reward
                 current_node = next_node
                 route.append(current_node)
-                # Add to visited set *only if* it's not the start node
                 if current_node != start_node:
                     visited_intermediate_nodes.add(current_node)
 
-                state = np.array([current_node, min(time_elapsed, MAX_DURATION) / MAX_DURATION], dtype=np.float32)
+                state = np.array([current_node, min(time_elapsed, MAX_DURATION) / MAX_DURATION],
+                                 dtype=np.float32)
 
-                # --- Check for Natural Return ---
+                # --- Regreso natural ---
                 if current_node == start_node:
                     returned_home = True
                     break
 
-            # --- End of Step Loop ---
-
-            # --- Handle Forced Return if max_steps reached ---
-            # (This logic might be less necessary now but keep as fallback)
+            # --- Regreso forzado si se agotaron los pasos ---
             if not returned_home and current_node != start_node:
-                # print(f"DRL: Max steps reached, attempting forced return from {current_node} to {start_node}")
                 return_time = time_matrix[current_node][start_node]
                 return_reward = reward_matrix[current_node][start_node]
-                if time_elapsed + return_time <= MAX_DURATION + 1e-6:
+                if time_elapsed + return_time <= MAX_DURATION + TIME_EPS:
                     time_elapsed += return_time
                     total_reward += return_reward
                     current_node = start_node
                     route.append(start_node)
                     returned_home = True
-                # else: # Forced return violates time
-                    # returned_home remains False
-
-        # --- Final Validation ---
+    finally:
+        # Garantiza que la red vuelva a modo entrenamiento incluso si algo falla
+        # a mitad (el original solo lo hacía en la ruta feliz).
         agent.policy_net.train()
 
-        is_cycle = returned_home and route[0] == start_node and route[-1] == start_node and len(route)>1
+    # --- Validación final ---
+    is_cycle = (returned_home and route[0] == start_node
+                and route[-1] == start_node and len(route) > 1)
+    if not is_cycle:
+        return None, -np.inf, np.inf  # ruta fallida
 
-        if not is_cycle:
-            return None, -np.inf, np.inf # Failed route
+    intermediate_nodes = route[1:-1]
+    has_duplicates = len(intermediate_nodes) != len(set(intermediate_nodes))
+    if has_duplicates:
+        print(f"Warning: DRL route {route} has duplicate intermediate nodes despite masking!")
 
-        is_valid_duration = time_elapsed <= MAX_DURATION
-
-        # Check for duplicate intermediate nodes (should be prevented by logic above)
-        intermediate_nodes = route[1:-1]
-        has_duplicates = len(intermediate_nodes) != len(set(intermediate_nodes))
-        if has_duplicates:
-            print(f"Warning: DRL route {route} has duplicate intermediate nodes despite masking!")
-            # Treat as invalid? Or just note it. Let's return it but validity check below will fail if needed.
-
-        if is_valid_duration and not has_duplicates:
-            return route, total_reward, time_elapsed # Valid cycle found
-        else:
-            # Cycle formed, but duration or node visit is invalid
-            return route, total_reward, time_elapsed # Return invalid route details
-
-def solve_mip(start_node, time_m, reward_m, max_d, num_n):
-    """Solves the VRP variant using MIP for a given start node."""
-    nodes = list(range(num_n))
-    other_nodes = [n for n in nodes if n != start_node]
-
-    # Create the model
-    prob = pulp.LpProblem(f"VRP_Cycle_{start_node}", pulp.LpMaximize)
-
-    # Decision Variables
-    x = pulp.LpVariable.dicts("Route", (nodes, nodes), 0, 1, pulp.LpBinary)
-    u = pulp.LpVariable.dicts("MTZ", nodes, 1, num_n - 1, pulp.LpContinuous)
-
-    # Objective Function
-    prob += pulp.lpSum(reward_m[i][j] * x[i][j] for i in nodes for j in nodes if i != j)
-
-    # Constraints
-    # 1. Degree Constraints
-    for k in nodes:
-        prob += pulp.lpSum(x[k][j] for j in nodes if k != j) == pulp.lpSum(x[j][k] for j in nodes if k != j)
-        if k == start_node:
-            prob += pulp.lpSum(x[start_node][j] for j in nodes if j != start_node) == 1
-            prob += pulp.lpSum(x[j][start_node] for j in nodes if j != start_node) == 1
-        else:
-             prob += pulp.lpSum(x[j][k] for j in nodes if j != k) <= 1
-
-    # 2. Duration Constraints
-    total_time = pulp.lpSum(time_m[i][j] * x[i][j] for i in nodes for j in nodes if i != j)
-    prob += total_time <= max_d
-
-    # 3. Subtour Elimination (MTZ)
-    for i in other_nodes:
-        prob += u[i] >= 1
-        for j in other_nodes:
-            if i != j:
-                 prob += u[i] - u[j] + 1 <= (num_n - 1) * (1 - x[i][j])
-
-    # Solve the problem
-    solver = pulp.PULP_CBC_CMD(msg=0)
-    prob.solve(solver)
-
-    # Extract results
-    status = pulp.LpStatus[prob.status]
-    route = None
-    total_reward = -np.inf
-    total_duration = np.inf
-
-    if status == 'Optimal':
-        total_reward = pulp.value(prob.objective)
-        total_duration = pulp.value(total_time)
-
-        # --- Modified Route Reconstruction ---
-        try: # Add a try-except block for safety during reconstruction
-            current_node = start_node
-            route = [start_node]
-            visited_count = 0 # Safety counter
-
-            while visited_count <= num_n: # Limit search depth
-                found_next = False
-                for j in nodes:
-                    # Check if arc variable exists, is not None, and is selected (> 0.99)
-                    # Also ensure j is not the current node
-                    if j != current_node and \
-                       x[current_node][j] is not None and \
-                       x[current_node][j].varValue is not None and \
-                       x[current_node][j].varValue > 0.99:
-
-                        route.append(j)
-                        current_node = j
-                        found_next = True
-                        break # Move to the next node in the path
-
-                visited_count += 1
-
-                if current_node == start_node: # Successfully completed the cycle
-                    break
-                if not found_next: # Dead end found during reconstruction
-                    # print(f"MIP Route Reconstruction Error: Dead end at node {current_node} for start {start_node}.")
-                    route = None # Invalid route
-                    break
-                if visited_count > num_n: # Avoid infinite loops / too many steps
-                    # print(f"MIP Route Reconstruction Error: Route too long for start {start_node}. Path: {route}")
-                    route = None # Invalid route
-                    break
-
-            # Final validation of reconstructed route
-            if route is None or route[0] != start_node or route[-1] != start_node:
-                 # print(f"MIP Route Reconstruction resulted in invalid path for start {start_node}. Route: {route}")
-                 route = None
-                 # If route is invalid, reset reward/duration derived from MIP objective
-                 total_reward = -np.inf
-                 total_duration = np.inf
-                 status = 'Error_In_Route' # Update status to reflect this
-
-        except Exception as e:
-            print(f"Exception during MIP route reconstruction for start {start_node}: {e}")
-            route = None
-            total_reward = -np.inf
-            total_duration = np.inf
-            status = 'Error_Exception'
-        # --- End of Modified Route Reconstruction ---
-
-    # Ensure reward/duration are consistent if route is None
-    if route is None:
-         total_reward = -np.inf
-         total_duration = np.inf
-         # Update status if it was 'Optimal' but route failed
-         if status == 'Optimal': status = 'Optimal_Route_Fail'
-
-    return status, route, total_reward, total_duration
+    # En ambos casos (válido o con duración/nodos inválidos) se devuelven los
+    # detalles del ciclo, igual que en el original.
+    return route, total_reward, time_elapsed
 
 def solve_heuristic(start_node, time_m, reward_m, max_d, num_n):
     current_node = start_node
@@ -288,22 +242,28 @@ def solve_heuristic(start_node, time_m, reward_m, max_d, num_n):
     is_valid = (route[-1] == start_node and len(route) > 1
                 and time_elapsed <= max_d)
     status = "Optimal" if is_valid else "Infeasible"
-    return status, route, total_reward, time_elapsed, is_valid
+    return RHResult(status, route, total_reward, time_elapsed, is_valid)
 
 
 def solve_lp_relaxation(start_node, time_m, reward_m, max_d, num_n):
-    """Solves LP relaxation of the VRP variant for upper bound."""
-    nodes = list(range(num_n))
-    other_nodes = [n for n in nodes if n != start_node]
+    """Relajación LP de la variante VRP para obtener una cota superior.
 
-    # Create LP model
+    Nota: se relajan deliberadamente las restricciones de eliminación de subtours
+    (no se añaden cortes tipo MTZ); para una *cota superior* esto sigue siendo
+    válido. Por eso ya no se declaran las variables `u` ni la lista `other_nodes`,
+    que estaban muertas en la versión original.
+    """
+    import pulp  # import perezoso: única función del módulo que usa pulp
+
+    nodes = list(range(num_n))
+
+    # Modelo LP
     lp_prob = pulp.LpProblem(f"VRP_LP_Relaxation_{start_node}", pulp.LpMaximize)
 
-    # Decision Variables (continuous between 0 and 1)
+    # Variables de decisión (continuas en [0, 1])
     x = pulp.LpVariable.dicts("Route", (nodes, nodes), 0, 1, pulp.LpContinuous)
-    u = pulp.LpVariable.dicts("MTZ", nodes, 1, num_n - 1, pulp.LpContinuous)
 
-    # Same objective and constraints as MIP
+    # Mismo objetivo y restricciones que el MIP
     lp_prob += pulp.lpSum(reward_m[i][j] * x[i][j] for i in nodes for j in nodes if i != j)
 
     for k in nodes:
@@ -381,7 +341,7 @@ def solve_2opt_heuristic(start_node, time_m, reward_m, max_d, num_n):
         start_node, time_m, reward_m, max_d, num_n
     )
     if not is_valid:
-        return status, route, total_reward, total_time, is_valid
+        return RHResult(status, route, total_reward, total_time, is_valid)
 
     best_route = route[:]
     best_reward = total_reward
@@ -431,7 +391,7 @@ def solve_2opt_heuristic(start_node, time_m, reward_m, max_d, num_n):
                 and best_route[0] == start_node
                 and best_route[-1] == start_node)
     status = "Optimal" if is_valid else "Infeasible"
-    return status, best_route, best_reward, best_time, is_valid
+    return RHResult(status, best_route, best_reward, best_time, is_valid)
 
 
 def solve_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n, seed=None):
@@ -442,6 +402,11 @@ def solve_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n, seed=Non
     3. Accept solutions if they improve best known or pass probabilistic criterion
     Returns: status, route, total_reward, total_duration (same format as solve_mip)
     """
+    # Aislamiento del RNG: guardamos el estado global y lo restauramos antes de
+    # cada return, para no contaminar el RNG global del proceso. Seguimos usando
+    # np.random.seed(seed) para que la SECUENCIA de números sea idéntica a la del
+    # original (no se cambia a default_rng, que produciría otra secuencia).
+    _rng_state = np.random.get_state() if seed is not None else None
     if seed is not None:
         np.random.seed(seed)
     max_arcs = num_n - 1
@@ -468,7 +433,9 @@ def solve_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n, seed=Non
                     fallback_reward = r
                     fallback_time = t
         if fallback_route is None:
-            return "Infeasible", None, -np.inf, np.inf
+            if _rng_state is not None:
+                np.random.set_state(_rng_state)
+            return MetaResult("Infeasible", None, -np.inf, np.inf)
         init_route = fallback_route
         init_reward = fallback_reward
         init_time = fallback_time
@@ -564,7 +531,9 @@ def solve_LNS_metaheuristic(start_node, time_m, reward_m, max_d, num_n, seed=Non
 
     final_status = "Optimal" if is_valid else "Infeasible"
 
-    return final_status, best_route, best_reward, best_time
+    if _rng_state is not None:
+        np.random.set_state(_rng_state)
+    return MetaResult(final_status, best_route, best_reward, best_time)
 
 
 def _repair_route_lns_best_position(destroyed_route, removed_nodes, start_node, time_m, reward_m, max_d):
@@ -638,7 +607,7 @@ def _repair_route_lns_best_position(destroyed_route, removed_nodes, start_node, 
 
                 # Scoring function: reward benefit - penalty * time increase
                 # (tunable weighting)
-                score = delta_r - 0.001 * max(delta_t, 0)
+                score = delta_r - INSERTION_TIME_PENALTY * max(delta_t, 0)
 
                 if score > best_global_gain:
                     best_global_gain = score
@@ -680,6 +649,8 @@ def solve_genetic_algorithm(start_node, time_m, reward_m, max_d, num_n, seed=Non
     3. Return best solution from population
     Returns: status, route, total_reward, total_duration (same format as solve_mip)
     """
+    # Aislamiento del RNG global (ver nota en solve_LNS_metaheuristic).
+    _rng_state = np.random.get_state() if seed is not None else None
     if seed is not None:
         np.random.seed(seed)
     max_route_len = num_n
@@ -722,7 +693,9 @@ def solve_genetic_algorithm(start_node, time_m, reward_m, max_d, num_n, seed=Non
             if duration <= max_d:
                 population.append({'route': route, 'reward': reward, 'duration': duration})
     if not population:
-        return "Infeasible", None, -np.inf, np.inf
+        if _rng_state is not None:
+            np.random.set_state(_rng_state)
+        return MetaResult("Infeasible", None, -np.inf, np.inf)
 
     best_overall = max(population, key=lambda x: x['reward'])
     gens = 0
@@ -791,7 +764,10 @@ def solve_genetic_algorithm(start_node, time_m, reward_m, max_d, num_n, seed=Non
 
     final_status = "Optimal" if is_valid else "Infeasible"
 
-    return final_status, best_overall['route'], best_overall['reward'], best_overall['duration']
+    if _rng_state is not None:
+        np.random.set_state(_rng_state)
+    return MetaResult(final_status, best_overall['route'],
+                      best_overall['reward'], best_overall['duration'])
 
 
 def _generate_route_nearest_neighbor(start_node, time_m, reward_m, max_d, num_n):
@@ -924,8 +900,7 @@ def _crossover_routes(route1, route2, start_node, time_m, reward_m, max_d, num_n
         return route1 if np.random.rand() < 0.5 else route2
 
     # Extract intermediate nodes (exclude start/end)
-    nodes1 = set(route1[1:-1])
-    nodes2 = set(route2[1:-1])
+    # (nodes1/nodes2 eran variables muertas: se eliminaron.)
 
     # Select random segment from parent1
     seg_start = np.random.randint(1, min(len(route1) - 2, 4))  # Keep segment reasonable
@@ -1043,7 +1018,7 @@ def solve_HGA_LNS_metaheuristic(
 
     Internal fitness uses simulate_route_reward() with sequential arrival days
     (avail_prob_arr=None, deterministic world), so every individual in the
-    population is evaluated on the same footing as MIP-Exact and DRL Det.
+    population is evaluated on the same footing as DRL Det.
     Search operators (crossover, LNS repair, 2-opt) still use the static day-0
     reward matrix for fast local decisions.
 
@@ -1055,18 +1030,15 @@ def solve_HGA_LNS_metaheuristic(
     )
     time_m_np = np.array(time_m, dtype=float)
 
-    # Pre-cache reward matrices as numpy arrays so _eval avoids pandas overhead.
-    # Semantically identical to simulate_route_reward(..., avail_prob_arr=None).
+    # Caché de matrices de reward (numpy) por día, vía el helper compartido.
+    # Semánticamente idéntico a simulate_route_reward(..., avail_prob_arr=None):
+    # construye la matriz del día bajo demanda y la cachea durante esta llamada.
     max_day = rate_stack.shape[0] - 1
-    _max_offset = int(max_d // 14) + 2
-    _rm_cache: dict = {}
-    for _d in range(start_day_idx, min(start_day_idx + _max_offset, max_day + 1)):
-        _, _rm_df = build_day_matrices(rate_stack[_d], loads_stack[_d], distance_arr, diesel_arr)
-        _rm_cache[_d] = _rm_df.to_numpy()
-    if max_day not in _rm_cache:
-        _, _rm_df = build_day_matrices(rate_stack[max_day], loads_stack[max_day], distance_arr, diesel_arr)
-        _rm_cache[max_day] = _rm_df.to_numpy()
+    _get_rm = _make_rm_cache(rate_stack, loads_stack, distance_arr, diesel_arr,
+                             start_day_idx, max_day, as_numpy=True)
 
+    # Aislamiento del RNG global (ver nota en solve_LNS_metaheuristic).
+    _rng_state = np.random.get_state() if seed is not None else None
     if seed is not None:
         np.random.seed(seed)
     max_route_len = num_n
@@ -1083,15 +1055,14 @@ def solve_HGA_LNS_metaheuristic(
     population = []
 
     def _eval(route):
-        """Fast canonical fitness: pre-cached numpy matrices, sequential arrival days."""
+        """Fast canonical fitness: matrices numpy cacheadas, días secuenciales."""
         if route is None or len(route) < 2:
             return -np.inf, np.inf
         t = 0.0
         r = 0.0
         for k in range(len(route) - 1):
             i, j = route[k], route[k + 1]
-            d = min(start_day_idx + int(t // 14), max_day)
-            r += _rm_cache[d][i, j]
+            r += _get_rm(t)[i, j]
             t += time_m_np[i, j]
         return r, t
 
@@ -1245,88 +1216,28 @@ def solve_HGA_LNS_metaheuristic(
                     fallback_best_reward = _r
                     fallback_best_route  = candidate
         if fallback_best_route is not None:
-            return "Optimal", fallback_best_route, fallback_best_reward, \
-                   float(sum(time_m_np[fallback_best_route[i], fallback_best_route[i+1]]
-                             for i in range(len(fallback_best_route)-1)))
-        return final_status, None, -np.inf, np.inf
+            if _rng_state is not None:
+                np.random.set_state(_rng_state)
+            return MetaResult(
+                "Optimal", fallback_best_route, fallback_best_reward,
+                float(sum(time_m_np[fallback_best_route[i], fallback_best_route[i+1]]
+                          for i in range(len(fallback_best_route)-1))))
+        if _rng_state is not None:
+            np.random.set_state(_rng_state)
+        return MetaResult(final_status, None, -np.inf, np.inf)
 
     # Canonical re-evaluation via simulate_route_reward guarantees bit-exact
-    # parity with MIP-Exact and all other solvers. The internal _eval uses
-    # pre-cached numpy arrays (_rm_cache) whose float accumulation can diverge
-    # slightly from simulate_route_reward, causing the winner to appear above
-    # the MIP-Exact bound. Passing avail_prob_arr=None keeps this deterministic.
+    # parity with all other solvers. The internal _eval uses pre-cached numpy
+    # arrays (_rm_cache) whose float accumulation can diverge slightly from
+    # simulate_route_reward. Passing avail_prob_arr=None keeps this deterministic.
     total_reward, total_duration = simulate_route_reward(
         best_overall['route'], start_node, start_day_idx,
         time_m_np, rate_stack, loads_stack, distance_arr, diesel_arr,
         avail_prob_arr=None,
     )
-    return final_status, best_overall['route'], total_reward, total_duration
-
-
-def _oracle_matrix_from_days(
-    arrival_days, start_node, rate_stack, loads_stack,
-    distance_arr, diesel_arr, start_day_idx, avail_prob_arr,
-    num_nodes, max_day,
-):
-    """Build the oracle reward matrix given a pre-computed per-node arrival-day array.
-
-    Arcs from/to start_node are never Bernoulli-filtered, matching
-    beam_search_dynamic which skips lane filtering when current_node == start_node.
-    Blocked arcs (lane_exists[j] == 0) get BIG_M_PENALTY so the MIP avoids them.
-    """
-    from config import MPG, MARGINAL_COST_SIN_DIESEL, BIG_M_PENALTY
-
-    unique_days = np.unique(arrival_days)
-    reward_by_day = {}
-    for d in unique_days:
-        revenue = (rate_stack[d] * distance_arr).copy()
-        revenue[loads_stack[d] <= 1] = 0
-        cost = distance_arr * (diesel_arr / MPG) + distance_arr * MARGINAL_COST_SIN_DIESEL
-        reward_by_day[d] = np.round(revenue - cost, 0)
-
-    oracle_r = np.full((num_nodes, num_nodes), BIG_M_PENALTY, dtype=np.float64)
-    for i in range(num_nodes):
-        arrival_day_i = int(arrival_days[i])
-        seed = int((start_day_idx * 9973 + i * 97 + arrival_day_i) & 0xFFFFFFFF)
-        rng = np.random.default_rng(seed)
-        lane_exists = (rng.random(num_nodes) < avail_prob_arr[i]).astype(np.int8)
-        for j in range(num_nodes):
-            if i == j:
-                oracle_r[i, j] = BIG_M_PENALTY
-            elif i == start_node or j == start_node:
-                oracle_r[i, j] = reward_by_day[arrival_day_i][i, j]
-            elif lane_exists[j] == 1:
-                oracle_r[i, j] = reward_by_day[arrival_day_i][i, j]
-            # else: lane_exists[j] == 0 → stays BIG_M_PENALTY
-
-    return oracle_r
-
-
-def build_oracle_reward_matrix(
-    start_node, time_matrix_np, rate_stack, loads_stack,
-    distance_arr, diesel_arr, start_day_idx, avail_prob_arr,
-    num_nodes, max_day,
-):
-    """Oracle reward matrix using Dijkstra arrival days (public helper, kept for compat).
-
-    solve_mip_oracle uses _oracle_matrix_from_days directly with iteratively
-    refined arrival days; this function is retained as a convenience entry point.
-    """
-    from scipy.sparse.csgraph import shortest_path
-    from scipy.sparse import csr_matrix
-
-    sparse_tm    = csr_matrix(time_matrix_np)
-    dist_matrix  = shortest_path(sparse_tm, method='D', directed=True, indices=start_node)
-    arrival_days = np.array([
-        min(start_day_idx + int(dist_matrix[i] // 14), max_day)
-        for i in range(num_nodes)
-    ], dtype=np.int32)
-
-    return _oracle_matrix_from_days(
-        arrival_days, start_node, rate_stack, loads_stack,
-        distance_arr, diesel_arr, start_day_idx, avail_prob_arr,
-        num_nodes, max_day,
-    )
+    if _rng_state is not None:
+        np.random.set_state(_rng_state)
+    return MetaResult(final_status, best_overall['route'], total_reward, total_duration)
 
 
 def simulate_route_reward(
@@ -1351,22 +1262,17 @@ def simulate_route_reward(
     If avail_prob_arr is None, no Bernoulli filtering is applied (backward
     compatible with callers that do not supply availability data).
     """
-    from problem_data import build_day_matrices, draw_lane_availability
+    from problem_data import draw_lane_availability
 
     if route is None or len(route) < 2:
-        return -np.inf, np.inf
+        return RewardResult(-np.inf, np.inf)
 
     max_day   = rate_stack.shape[0] - 1
     num_nodes = distance_arr.shape[0]
-    day_cache = {}
-
-    def _get_rm(day_idx):
-        if day_idx not in day_cache:
-            _, rm = build_day_matrices(
-                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
-            )
-            day_cache[day_idx] = rm
-        return day_cache[day_idx]
+    # Caché compartido en modo DataFrame: simulate_route_reward indexa con
+    # rm.iloc[i, j], por lo que necesita el DataFrame (as_numpy=False).
+    _get_rm = _make_rm_cache(rate_stack, loads_stack, distance_arr, diesel_arr,
+                             start_day_idx, max_day, as_numpy=False)
 
     time_elapsed = 0.0
     total_reward = 0.0
@@ -1374,8 +1280,8 @@ def simulate_route_reward(
     for step in range(len(route) - 1):
         i       = route[step]
         j       = route[step + 1]
-        day_idx = min(start_day_idx + int(time_elapsed // 14), max_day)
-        rm      = _get_rm(day_idx)
+        day_idx = _day_index(start_day_idx, time_elapsed, max_day)
+        rm      = _get_rm(time_elapsed)
         arc_r   = float(rm.iloc[i, j])
 
         # Mirror beam_search_dynamic: skip Bernoulli when departing from or
@@ -1393,367 +1299,7 @@ def simulate_route_reward(
         total_reward += arc_r
         time_elapsed += float(time_matrix_np[i][j])
 
-    return total_reward, time_elapsed
-
-
-def solve_mip_oracle(
-    start_node, time_matrix_np, rate_stack, loads_stack,
-    distance_arr, diesel_arr, max_d, num_n, start_day_idx, avail_prob_arr,
-    max_iter=5,
-):
-    """MIP oracle with iterative arrival-day refinement.
-
-    Iteration 0 uses Dijkstra arrival days as the initial estimate.  After each
-    MIP solve the chosen route is walked sequentially; the real arrival day for
-    every visited node is fed back into arrival_days and the MIP is re-solved.
-    The loop stops when the route stops changing (fixed point) or max_iter is
-    reached.  At convergence, the Bernoulli seeds used inside the oracle matrix
-    match exactly the seeds that draw_lane_availability would produce during a
-    DRL Real rollout following the same route — eliminating the Dijkstra-day
-    inconsistency.  Nodes never visited by the converged route retain Dijkstra
-    days (they were evaluated but not selected, so their seeds don't affect the
-    final result).
-
-    The final reported reward is computed by simulate_route_reward with real
-    sequential days and Bernoulli filtering, keeping the Oracle on the same
-    stochastic footing as DRL Real.
-    """
-    from scipy.sparse.csgraph import shortest_path
-    from scipy.sparse import csr_matrix
-
-    max_day     = rate_stack.shape[0] - 1
-    nodes       = list(range(num_n))
-    other_nodes = [n for n in nodes if n != start_node]
-
-    # ── inner helpers ────────────────────────────────────────────────────────
-
-    def _run_mip(oracle_r):
-        """Build and solve the MIP for one iteration; return (status_str, route|None)."""
-        prob = pulp.LpProblem(f"VRP_Oracle_{start_node}", pulp.LpMaximize)
-        x = pulp.LpVariable.dicts("Route", (nodes, nodes), 0, 1, pulp.LpBinary)
-        u = pulp.LpVariable.dicts("MTZ",   nodes, 1, num_n - 1, pulp.LpContinuous)
-
-        prob += pulp.lpSum(
-            oracle_r[i][j] * x[i][j] for i in nodes for j in nodes if i != j
-        )
-        for k in nodes:
-            prob += (
-                pulp.lpSum(x[k][j] for j in nodes if k != j)
-                == pulp.lpSum(x[j][k] for j in nodes if k != j)
-            )
-            if k == start_node:
-                prob += pulp.lpSum(x[start_node][j] for j in nodes if j != start_node) == 1
-                prob += pulp.lpSum(x[j][start_node] for j in nodes if j != start_node) == 1
-            else:
-                prob += pulp.lpSum(x[j][k] for j in nodes if j != k) <= 1
-
-        total_time = pulp.lpSum(
-            time_matrix_np[i][j] * x[i][j] for i in nodes for j in nodes if i != j
-        )
-        prob += total_time <= max_d
-
-        for i in other_nodes:
-            prob += u[i] >= 1
-            for j in other_nodes:
-                if i != j:
-                    prob += u[i] - u[j] + 1 <= (num_n - 1) * (1 - x[i][j])
-
-        pulp.PULP_CBC_CMD(msg=0).solve(prob)
-        status = pulp.LpStatus[prob.status]
-        if status != 'Optimal':
-            return status, None
-
-        try:
-            cur = start_node
-            route = [start_node]
-            for _ in range(num_n + 1):
-                moved = False
-                for j in nodes:
-                    v = x[cur][j].varValue if (x[cur][j] is not None
-                                               and x[cur][j].varValue is not None) else 0.0
-                    if j != cur and v > 0.99:
-                        route.append(j)
-                        cur = j
-                        moved = True
-                        break
-                if cur == start_node:
-                    break
-                if not moved:
-                    return 'Error_In_Route', None
-            if route[0] != start_node or route[-1] != start_node:
-                return 'Error_In_Route', None
-            return status, route
-        except Exception as exc:
-            print(f"  [Oracle] route reconstruction error (start={start_node}): {exc}")
-            return 'Error_Exception', None
-
-    def _sequential_days(route):
-        """Return {node: real_arrival_day} for every node in route."""
-        days = {}
-        t = 0.0
-        for step in range(len(route) - 1):
-            i = route[step]
-            days[i] = min(start_day_idx + int(t // 14), max_day)
-            t += float(time_matrix_np[i][route[step + 1]])
-        days[route[-1]] = min(start_day_idx + int(t // 14), max_day)
-        return days
-
-    # ── initialise arrival_days with Dijkstra estimate ───────────────────────
-
-    sparse_tm    = csr_matrix(time_matrix_np)
-    dist_m       = shortest_path(sparse_tm, method='D', directed=True, indices=start_node)
-    arrival_days = np.array([
-        min(start_day_idx + int(dist_m[i] // 14), max_day)
-        for i in range(num_n)
-    ], dtype=np.int32)
-
-    # ── iterative fixed-point loop ───────────────────────────────────────────
-
-    prev_route = None
-    status     = 'Infeasible'
-    route      = None
-
-    for _it in range(max_iter):
-        oracle_r       = _oracle_matrix_from_days(
-            arrival_days, start_node, rate_stack, loads_stack,
-            distance_arr, diesel_arr, start_day_idx, avail_prob_arr,
-            num_n, max_day,
-        )
-        status, route = _run_mip(oracle_r)
-
-        if route is None:
-            break
-
-        if route == prev_route:
-            # Fixed point reached: arrival_days already reflect this route.
-            break
-
-        # Refine arrival_days for every node on the route with real sequential
-        # days.  Nodes not on the route keep their current (Dijkstra) estimate.
-        for node, real_day in _sequential_days(route).items():
-            arrival_days[node] = real_day
-
-        prev_route = route
-
-    # ── final reward evaluation ──────────────────────────────────────────────
-
-    if route is None or len(route) < 2:
-        return status if status != 'Optimal' else 'Infeasible', None, -np.inf, np.inf
-
-    total_reward, total_duration = simulate_route_reward(
-        route, start_node, start_day_idx,
-        time_matrix_np, rate_stack, loads_stack, distance_arr, diesel_arr,
-        avail_prob_arr=avail_prob_arr,
-    )
-    return status, route, total_reward, total_duration
-
-
-def solve_mip_exact(
-    start_node:     int,
-    time_matrix_np: np.ndarray,
-    rate_stack:     np.ndarray,
-    loads_stack:    np.ndarray,
-    distance_arr:   np.ndarray,
-    diesel_arr:     np.ndarray,
-    max_d:          float,
-    num_n:          int,
-    start_day_idx:  int,
-    avail_prob_arr: np.ndarray = None,   # accepted but intentionally ignored
-) -> tuple:
-    """Exact time-indexed MIP — deterministic optimal upper bound.
-
-    Solves the routing problem on the *deterministic* world (no Bernoulli lane
-    filtering), so the returned reward is a provable upper bound for any solver
-    evaluated on the same deterministic reward matrices.
-
-    Day-partition formulation
-    -------------------------
-    K_max = floor(max_d / 14) gives at most K_max+1 ≤ 6 distinct day offsets.
-    Binary z[i,j,k] = 1 iff arc (i→j) is active AND int(t_i // 14) == k.
-    Continuous t[i] tracks the *exact* cumulative arrival time at each visited
-    node: tight lower AND upper bounds jointly enforce t[j] = t[i] + time[i,j]
-    on every active arc, preventing the solver from inflating t[i] to claim a
-    more profitable day slot.  The t propagation also eliminates subtours
-    (any non-depot cycle implies sum-of-times ≥ 0, contradiction).
-
-    Returns
-    -------
-    (status, route, total_reward, total_duration)
-    reward recomputed via simulate_route_reward(..., avail_prob_arr=None)
-    for bit-exact parity with the DRL deterministic evaluation.
-    """
-    from problem_data import build_day_matrices
-
-    max_day     = rate_stack.shape[0] - 1
-    nodes       = list(range(num_n))
-    other_nodes = [n for n in nodes if n != start_node]
-
-    K_max = int(max_d // 14)        # 5 for max_d ≈ 77
-    k_set = list(range(K_max + 1))
-    # BIG_M_T: big-M for time-propagation constraints (C4).
-    # Must be ≥ max_d + max(time[i,j]) so that inactive arcs impose no
-    # binding lower bound on arrival times of non-visited nodes.
-    BIG_M_T = float(max_d) + float(time_matrix_np.max())
-    # BIG_M_D: big-M for day-boundary constraints (C6).
-    # Must be ≥ max_d + 14*K_max so that the LP relaxation at B&B nodes where
-    # some x variables are fixed (and t[i] is forced by C4) never makes C6b
-    # spuriously binding below the C4-forced t value for fractional z.
-    # With BIG_M_D = max_d only, C6b: t[i] ≤ 14*(k+1) - EPS + max_d*(1-z)
-    # can force t[i] ≤ ~29h for z≈0.5 and k=0, invalidating the LP relaxation.
-    BIG_M_D = float(max_d) + 14.0 * K_max
-    EPS     = 1e-6   # strict day-boundary upper bound (floor is left-closed)
-
-    # Pre-compute deterministic reward matrices for each day offset (no Bernoulli)
-    R_det = {}
-    for k in k_set:
-        day = min(start_day_idx + k, max_day)
-        _, rm = build_day_matrices(
-            rate_stack[day], loads_stack[day], distance_arr, diesel_arr
-        )
-        R_det[k] = rm.to_numpy()   # shape (num_n, num_n), same as reward_matrix
-        np.fill_diagonal(R_det[k], 0.0) 
-
-
-    # ── Build PuLP model ─────────────────────────────────────────────────────
-    prob = pulp.LpProblem(f"MIP_Exact_{start_node}", pulp.LpMaximize)
-
-    x = {(i, j): pulp.LpVariable(f"x_{i}_{j}", cat=pulp.LpBinary)
-         for i in nodes for j in nodes if i != j}
-
-    # Arrival time at node i — exact when tight bounds are active on the route
-    t = {i: pulp.LpVariable(f"t_{i}", lowBound=0.0, upBound=float(max_d))
-         for i in nodes}
-
-    # Day-arc indicator: z[i,j,k]=1 iff arc used AND node i in day slot k
-    z = {(i, j, k): pulp.LpVariable(f"z_{i}_{j}_{k}", cat=pulp.LpBinary)
-         for i in nodes for j in nodes if i != j
-         for k in k_set}
-
-    # Objective: day-exact deterministic reward
-    prob += pulp.lpSum(
-        float(R_det[k][i, j]) * z[(i, j, k)]
-        for i in nodes for j in nodes if i != j
-        for k in k_set
-    )
-
-    # C1 – Flow conservation + degree
-    prob += pulp.lpSum(x[(start_node, j)] for j in other_nodes) == 1
-    prob += pulp.lpSum(x[(j, start_node)] for j in other_nodes) == 1
-    for i in other_nodes:
-        prob += (pulp.lpSum(x[(i, j)] for j in nodes if j != i) ==
-                 pulp.lpSum(x[(j, i)] for j in nodes if j != i))
-        prob += pulp.lpSum(x[(j, i)] for j in nodes if j != i) <= 1
-
-    # C2 – Duration
-    prob += (pulp.lpSum(
-        float(time_matrix_np[i][j]) * x[(i, j)]
-        for i in nodes for j in nodes if i != j
-    ) <= max_d)
-
-    # C3 – Departure time at start node is always zero (day slot 0)
-    prob += t[start_node] == 0.0
-
-    # C4 – Exact arrival times (subtour elimination + day tracking).
-    # Both bounds together force t[j] = t[i] + time[i,j] on every active arc.
-    # BIG_M_T = max_d + max(time) ensures inactive arcs impose no spurious
-    # lower bounds on arrival times of non-visited nodes.
-    for j in other_nodes:
-        for i in nodes:
-            if i == j:
-                continue
-            tij = float(time_matrix_np[i][j])
-            prob += t[j] >= t[i] + tij - BIG_M_T * (1 - x[(i, j)])   # lower
-            prob += t[j] <= t[i] + tij + BIG_M_T * (1 - x[(i, j)])   # upper
-
-    # C5 – Each arc is assigned to exactly one day slot
-    for i in nodes:
-        for j in nodes:
-            if i == j:
-                continue
-            prob += pulp.lpSum(z[(i, j, k)] for k in k_set) == x[(i, j)]
-
-    # C6 – Day-slot boundaries: z[i,j,k]=1 ↔ t[i] ∈ [14k, 14(k+1))
-    for i in nodes:
-        if i == start_node:
-            continue          # t[start_node]=0 fijado por C3, no necesita C6
-        for j in nodes:
-            if i == j:
-                continue
-            for k in k_set:
-                prob += t[i] >= 14.0 * k       - BIG_M_D * (1 - z[(i, j, k)])
-                prob += t[i] <= 14.0 * (k + 1) - EPS + BIG_M_D * (1 - z[(i, j, k)])
-
-    # ── Solve ────────────────────────────────────────────────────────────────
-    #pulp.PULP_CBC_CMD(msg=0, timeLimit=600).solve(prob)
-    pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapAbs=0.0001).solve(prob)
-
-    status = pulp.LpStatus[prob.status]
-    if status != 'Optimal':
-        return status, None, -np.inf, np.inf
-
-    # ── Route reconstruction ─────────────────────────────────────────────────
-    try:
-        cur   = start_node
-        route = [start_node]
-        for _ in range(num_n + 1):
-            moved = False
-            for j in nodes:
-                if j == cur:
-                    continue
-                v = x[(cur, j)].varValue
-                if v is not None and v > 0.99:
-                    route.append(j)
-                    cur = j
-                    moved = True
-                    break
-            if cur == start_node and len(route) > 1:
-                break
-            if not moved:
-                return 'Error_In_Route', None, -np.inf, np.inf
-        if route[0] != start_node or route[-1] != start_node:
-            return 'Error_In_Route', None, -np.inf, np.inf
-    except Exception as exc:
-        print(f"  [MIP-Exact] reconstruction error (start={start_node}): {exc}")
-        return 'Error_Exception', None, -np.inf, np.inf
-
-    # Final reward via simulate_route_reward with avail_prob_arr=None (no Bernoulli)
-    # to guarantee bit-exact parity with the DRL deterministic evaluation.
-    total_reward, total_duration = simulate_route_reward(
-        route, start_node, start_day_idx,
-        time_matrix_np, rate_stack, loads_stack, distance_arr, diesel_arr,
-        avail_prob_arr=None,
-    )
-
-    # ── Diagnóstico: detecta discrepancia entre objetivo MIP y reward re-evaluado
-    internal_obj = pulp.value(prob.objective)
-    if internal_obj is not None and abs(internal_obj - total_reward) > 1.0:
-        print(f"  [DIAG-FORMULACION] start={start_node} day={start_day_idx}: "
-              f"MIP interno={internal_obj:.1f}  simulate={total_reward:.1f}  "
-              f"diff={internal_obj - total_reward:.1f}  ruta={route}")
-    else:
-        print(f"  [DIAG-OK] start={start_node} day={start_day_idx}: "
-              f"MIP={total_reward:.1f}  ruta={route}")
-
-## Temporal, eliminar luego: diagnóstico específico para start_node=1, que es el caso donde detectamos la discrepancia entre MIP-Exact y DRL Det en la evaluación final.
-    if start_node == 1:
-        # Evalúa la ruta del DRL en el modelo MIP para ver por qué la rechaza
-        drl_route = [1, 15, 11, 13, 17, 1]
-        t_check = 0.0
-        print(f"  [CHECK] Evaluando ruta DRL {drl_route} en el MIP:")
-        for step in range(len(drl_route) - 1):
-            i, j = drl_route[step], drl_route[step+1]
-            k_sim = int(t_check // 14)          # día según simulate_route_reward
-            k_mip = min(k_sim, K_max)
-            r = float(R_det[k_mip][i, j]) if k_mip in R_det else 0.0
-            arc_t = float(time_matrix_np[i][j])
-            print(f"    arco {i}→{j}: t_salida={t_check:.2f}h  k={k_mip}  "
-                  f"reward={r:.1f}  arc_time={arc_t:.2f}h")
-            t_check += arc_t
-        total_t = t_check
-        print(f"    duración total: {total_t:.2f}h  (max_d={max_d:.2f}h)  "
-              f"factible: {total_t <= max_d}")
-
-    return status, route, total_reward, total_duration
+    return RewardResult(total_reward, time_elapsed)
 
 
 def solve_heuristic_rolling_horizon(
@@ -1771,16 +1317,11 @@ def solve_heuristic_rolling_horizon(
     Devuelve: status, route, total_reward, total_duration, is_valid
     (mismo formato que solve_heuristic).
     """
-    from problem_data import build_day_matrices
-
     num_days = rate_stack.shape[0]
-
-    def reward_matrix_for_time(t_elapsed):
-        day_idx = min(start_day_idx + int(t_elapsed // 14), num_days - 1)
-        _, rm_pen = build_day_matrices(
-            rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
-        )
-        return rm_pen
+    # DataFrame (as_numpy=False): esta función indexa rm[current_node][next_node]
+    # (acceso por columnas de pandas), por lo que debe conservar ese tipo.
+    _get_rm = _make_rm_cache(rate_stack, loads_stack, distance_arr, diesel_arr,
+                             start_day_idx, num_days - 1, as_numpy=False)
 
     if hasattr(time_m, 'iloc'):
         time_m = np.array(time_m, dtype=float)
@@ -1794,7 +1335,7 @@ def solve_heuristic_rolling_horizon(
 
     while steps < max_arcs:
         # Decision uses the current-day matrix (causal, same info as DRL).
-        rm = reward_matrix_for_time(time_elapsed)
+        rm = _get_rm(time_elapsed)
 
         best_score = -np.inf
         best_next_node = None
@@ -1818,25 +1359,12 @@ def solve_heuristic_rolling_horizon(
         else:
             break
 
-    # Close cycle (time only — reward not accumulated here).
-    if route[-1] != start_node:
-        return_time = time_m[current_node][start_node]
-        if time_elapsed + return_time <= max_d:
-            time_elapsed += return_time
-            route.append(start_node)
-
-    if route[-1] != start_node or len(route) < 2:
-        return "Infeasible", route if len(route) > 1 else None, -np.inf, time_elapsed, False
-
-    # Canonical evaluation — bit-exact with MIP-Exact and DRL Det.
-    total_reward, total_duration = simulate_route_reward(
-        route, start_node, start_day_idx,
-        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+    # Cierre de ciclo + validación + evaluación canónica (helper compartido).
+    return _close_cycle_and_finalize(
+        route, current_node, time_elapsed, start_node, time_m, max_d,
+        start_day_idx, rate_stack, loads_stack, distance_arr, diesel_arr,
         avail_prob_arr=None,
     )
-    is_valid = total_duration <= max_d
-    status = "Optimal" if is_valid else "Infeasible"
-    return status, route, total_reward, total_duration, is_valid
 
 
 def solve_heuristic_rolling_horizon_lookahead(
@@ -1870,25 +1398,15 @@ def solve_heuristic_rolling_horizon_lookahead(
     Devuelve: status, route, total_reward, total_duration, is_valid
     (mismo formato que solve_heuristic_rolling_horizon).
     """
-    from problem_data import build_day_matrices
-
     num_days  = rate_stack.shape[0]
     max_arcs  = num_n - 1
 
     if hasattr(time_m, 'iloc'):
         time_m = np.array(time_m, dtype=float)
 
-    # ── Cache de matrices de reward por día para evitar reconstrucciones ──────
-    _rm_cache: dict = {}
-
-    def _get_rm(t_elapsed):
-        day_idx = min(start_day_idx + int(t_elapsed // 14), num_days - 1)
-        if day_idx not in _rm_cache:
-            _, rm_pen = build_day_matrices(
-                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
-            )
-            _rm_cache[day_idx] = np.array(rm_pen, dtype=float)
-        return _rm_cache[day_idx]
+    # Cache de matrices de reward por día (numpy: esta función indexa rm[a, b]).
+    _get_rm = _make_rm_cache(rate_stack, loads_stack, distance_arr, diesel_arr,
+                             start_day_idx, num_days - 1, as_numpy=True)
 
     # ── Función de lookahead recursiva ────────────────────────────────────────
     def _lookahead_score(node, t_elapsed, visited_set, depth):
@@ -1976,25 +1494,12 @@ def solve_heuristic_rolling_horizon_lookahead(
         else:
             break
 
-    # Cerrar ciclo
-    if route[-1] != start_node:
-        return_time = time_m[current_node, start_node]
-        if time_elapsed + return_time <= max_d:
-            time_elapsed += return_time
-            route.append(start_node)
-
-    if route[-1] != start_node or len(route) < 2:
-        return "Infeasible", route if len(route) > 1 else None, -np.inf, time_elapsed, False
-
-    # Evaluación canónica — bit-exact con MIP-Exact y DRL Det.
-    total_reward, total_duration = simulate_route_reward(
-        route, start_node, start_day_idx,
-        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+    # Cierre de ciclo + validación + evaluación canónica (helper compartido).
+    return _close_cycle_and_finalize(
+        route, current_node, time_elapsed, start_node, time_m, max_d,
+        start_day_idx, rate_stack, loads_stack, distance_arr, diesel_arr,
         avail_prob_arr=None,
     )
-    is_valid = total_duration <= max_d
-    status   = "Optimal" if is_valid else "Infeasible"
-    return status, route, total_reward, total_duration, is_valid
 
 
 def solve_heuristic_rolling_horizon_lookahead_stochastic(
@@ -2016,7 +1521,7 @@ def solve_heuristic_rolling_horizon_lookahead_stochastic(
 
     Con lookahead=1 la función es idéntica a solve_heuristic_rolling_horizon_stochastic.
     """
-    from problem_data import build_day_matrices, draw_lane_availability
+    from problem_data import draw_lane_availability
 
     num_days = rate_stack.shape[0]
     max_day  = num_days - 1
@@ -2025,17 +1530,9 @@ def solve_heuristic_rolling_horizon_lookahead_stochastic(
     if hasattr(time_m, 'iloc'):
         time_m = np.array(time_m, dtype=float)
 
-    # Cache de matrices de reward por día para evitar reconstrucciones
-    _rm_cache: dict = {}
-
-    def _get_rm(t_elapsed):
-        day_idx = min(start_day_idx + int(t_elapsed // 14), max_day)
-        if day_idx not in _rm_cache:
-            _, rm_pen = build_day_matrices(
-                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
-            )
-            _rm_cache[day_idx] = np.array(rm_pen, dtype=float)
-        return _rm_cache[day_idx]
+    # Cache de matrices de reward por día (numpy: indexa rm[a, b]).
+    _get_rm = _make_rm_cache(rate_stack, loads_stack, distance_arr, diesel_arr,
+                             start_day_idx, max_day, as_numpy=True)
 
     def _lookahead_score(node, t_elapsed, visited_set, depth):
         """
@@ -2049,7 +1546,7 @@ def solve_heuristic_rolling_horizon_lookahead_stochastic(
         if depth == 0:
             return return_reward
 
-        arrival_day = min(start_day_idx + int(t_elapsed // 14), max_day)
+        arrival_day = _day_index(start_day_idx, t_elapsed, max_day)
         lane_exists = draw_lane_availability(
             start_day_idx, node=node, arrival_day=arrival_day,
             avail_prob_arr=avail_prob_arr, num_nodes=num_n,
@@ -2089,7 +1586,7 @@ def solve_heuristic_rolling_horizon_lookahead_stochastic(
 
     while steps < max_arcs:
         rm = _get_rm(time_elapsed)
-        arrival_day = min(start_day_idx + int(time_elapsed // 14), max_day)
+        arrival_day = _day_index(start_day_idx, time_elapsed, max_day)
         lane_exists = draw_lane_availability(
             start_day_idx, node=current_node, arrival_day=arrival_day,
             avail_prob_arr=avail_prob_arr, num_nodes=num_n,
@@ -2127,24 +1624,12 @@ def solve_heuristic_rolling_horizon_lookahead_stochastic(
         else:
             break
 
-    # Cerrar ciclo
-    if route[-1] != start_node:
-        return_time = time_m[current_node, start_node]
-        if time_elapsed + return_time <= max_d:
-            time_elapsed += return_time
-            route.append(start_node)
-
-    if route[-1] != start_node or len(route) < 2:
-        return "Infeasible", route if len(route) > 1 else None, -np.inf, time_elapsed, False
-
-    total_reward, total_duration = simulate_route_reward(
-        route, start_node, start_day_idx,
-        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+    # Cierre de ciclo + validación + evaluación canónica (helper compartido).
+    return _close_cycle_and_finalize(
+        route, current_node, time_elapsed, start_node, time_m, max_d,
+        start_day_idx, rate_stack, loads_stack, distance_arr, diesel_arr,
         avail_prob_arr=avail_prob_arr,
     )
-    is_valid = total_duration <= max_d
-    status   = "Optimal" if is_valid else "Infeasible"
-    return status, route, total_reward, total_duration, is_valid
 
 
 def _rh_greedy_stoch_from_state(
@@ -2161,10 +1646,17 @@ def _rh_greedy_stoch_from_state(
 
     Retorna el reward acumulado desde current_node hasta cerrar el ciclo en start_node,
     usando el mismo filtrado Bernoulli y la misma lógica de día dinámico que el resto
-    del sistema. El parámetro seed está reservado para futuros usos; los sorteos
-    Bernoulli son siempre deterministas dado (start_day_idx, node, arrival_day).
+    del sistema.
+
+    NOTA (comportamiento actual, preservado en el refactor): el parámetro `seed`
+    NO tiene efecto. La única fuente de aleatoriedad, draw_lane_availability, se
+    siembra internamente a partir de (start_day_idx, node, arrival_day) y NO del
+    RNG global ni de este `seed`. En consecuencia, las n_simulations trayectorias
+    que solve_mc_rollout_stochastic lanza por candidato son IDÉNTICAS entre sí, y
+    n_simulations no reduce varianza (solo multiplica el costo). Esto se documenta
+    aquí a propósito; "arreglarlo" cambiaría las salidas y debe validarse aparte.
     """
-    from problem_data import build_day_matrices, draw_lane_availability
+    from problem_data import draw_lane_availability
 
     num_days = rate_stack.shape[0]
     max_day = num_days - 1
@@ -2173,16 +1665,8 @@ def _rh_greedy_stoch_from_state(
     if hasattr(time_m, 'iloc'):
         time_m = np.array(time_m, dtype=float)
 
-    _rm_cache: dict = {}
-
-    def _get_rm(t):
-        day_idx = min(start_day_idx + int(t // 14), max_day)
-        if day_idx not in _rm_cache:
-            _, rm_pen = build_day_matrices(
-                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
-            )
-            _rm_cache[day_idx] = np.array(rm_pen, dtype=float)
-        return _rm_cache[day_idx]
+    _get_rm = _make_rm_cache(rate_stack, loads_stack, distance_arr, diesel_arr,
+                             start_day_idx, max_day, as_numpy=True)
 
     node = current_node
     t = float(time_elapsed)
@@ -2192,7 +1676,7 @@ def _rh_greedy_stoch_from_state(
 
     while steps < max_arcs:
         rm = _get_rm(t)
-        arrival_day = min(start_day_idx + int(t // 14), max_day)
+        arrival_day = _day_index(start_day_idx, t, max_day)
         lane_exists = draw_lane_availability(
             start_day_idx, node=node, arrival_day=arrival_day,
             avail_prob_arr=avail_prob_arr, num_nodes=num_n,
@@ -2270,7 +1754,7 @@ def solve_mc_rollout_stochastic(
     Mismo formato que todos los solvers estocásticos del sistema.
     reward recomputado con simulate_route_reward (evaluación canónica).
     """
-    from problem_data import build_day_matrices, draw_lane_availability
+    from problem_data import draw_lane_availability
 
     if hasattr(time_m, 'iloc'):
         time_m = np.array(time_m, dtype=float)
@@ -2279,16 +1763,8 @@ def solve_mc_rollout_stochastic(
     max_day = num_days - 1
     max_arcs = num_n - 1
 
-    _rm_cache: dict = {}
-
-    def _get_rm(t):
-        day_idx = min(start_day_idx + int(t // 14), max_day)
-        if day_idx not in _rm_cache:
-            _, rm_pen = build_day_matrices(
-                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
-            )
-            _rm_cache[day_idx] = np.array(rm_pen, dtype=float)
-        return _rm_cache[day_idx]
+    _get_rm = _make_rm_cache(rate_stack, loads_stack, distance_arr, diesel_arr,
+                             start_day_idx, max_day, as_numpy=True)
 
     current_node = start_node
     time_elapsed = 0.0
@@ -2298,7 +1774,7 @@ def solve_mc_rollout_stochastic(
 
     while steps < max_arcs:
         rm = _get_rm(time_elapsed)
-        arrival_day = min(start_day_idx + int(time_elapsed // 14), max_day)
+        arrival_day = _day_index(start_day_idx, time_elapsed, max_day)
         lane_exists = draw_lane_availability(
             start_day_idx, node=current_node, arrival_day=arrival_day,
             avail_prob_arr=avail_prob_arr, num_nodes=num_n,
@@ -2329,7 +1805,8 @@ def solve_mc_rollout_stochastic(
 
             future_rewards = []
             for k in range(n_simulations):
-                seed = int((start_day_idx * 9973 + j * 97 + k) & 0xFFFFFFFF)
+                seed = int((start_day_idx * _BERNOULLI_SEED_A
+                            + j * _BERNOULLI_SEED_B + k) & 0xFFFFFFFF)
                 future_r = _rh_greedy_stoch_from_state(
                     j, t_after, visited_after,
                     start_node, time_m, rate_stack, loads_stack,
@@ -2350,25 +1827,311 @@ def solve_mc_rollout_stochastic(
         visited.add(current_node)
         steps += 1
 
-    # Cerrar ciclo
-    if route[-1] != start_node:
-        ret_t = float(time_m[current_node, start_node])
-        if time_elapsed + ret_t <= max_d:
-            time_elapsed += ret_t
-            route.append(start_node)
-
-    if route[-1] != start_node or len(route) < 2:
-        return "Infeasible", route if len(route) > 1 else None, -np.inf, time_elapsed, False
-
-    # Evaluación canónica final — no usar Q-values acumulados durante el rollout
-    total_reward, total_duration = simulate_route_reward(
-        route, start_node, start_day_idx,
-        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+    # Cierre de ciclo + validación + evaluación canónica final (helper compartido).
+    # Importante: se re-evalúa con simulate_route_reward, NO con los Q-values
+    # acumulados durante el rollout.
+    return _close_cycle_and_finalize(
+        route, current_node, time_elapsed, start_node, time_m, max_d,
+        start_day_idx, rate_stack, loads_stack, distance_arr, diesel_arr,
         avail_prob_arr=avail_prob_arr,
     )
-    is_valid = total_duration <= max_d
-    status = "Optimal" if is_valid else "Infeasible"
-    return status, route, total_reward, total_duration, is_valid
+
+
+def solve_mip_dynamic(
+    start_node, time_m, rate_stack, loads_stack,
+    distance_arr, diesel_arr, max_d, num_n, start_day_idx,
+    time_limit_s=None,
+):
+    """MIP exacto con reward dependiente del día de salida del arco.
+
+    Formulación step-indexed (k = posición en la ruta):
+      x[i,j,k]  — binaria: arco (i,j) en el paso k.
+      z[k,b]     — binaria: el paso k parte en el bucket relativo b.
+      y[i,j,k,b] — continua [0,1]: linealización de x[i,j,k]·z[k,b].
+
+    El reward del arco (i,j) en el paso k usa la matriz del día
+    d(b) = min(start_day_idx + b, max_day), donde b es el bucket
+    elegido por z[k,b].  El día relevante es el de **salida** del arco,
+    replicando exactamente _day_index(start_day_idx, T_k, max_day).
+
+    NOTA: este MIP es cota superior **solo del track determinista**
+    (avail_prob_arr=None).  No es cota para el mundo estocástico.
+
+    Si `time_limit_s` corta antes de probar optimalidad, el status es
+    "TimeLimit" y **no** hay garantía de cota superior para esa instancia.
+    """
+    import pulp  # import perezoso: única función del módulo que usa pulp (además de solve_lp_relaxation)
+    from problem_data import build_day_matrices
+    from config import MIP_FLOOR_EPS
+    # DAYS_PER_PERIOD es constante del módulo Solvers (línea ~5)
+
+    # ── Preprocesamiento ──────────────────────────────────────────────────────
+    if hasattr(time_m, 'iloc'):
+        time_m = np.array(time_m, dtype=float)
+
+    max_day = rate_stack.shape[0] - 1
+
+    # Buckets relativos: b ∈ {0, …, B-1}
+    B = int(max_d // DAYS_PER_PERIOD) + 1   # con max_d=77 → B=6
+
+    # Caché de matrices de reward numpy (penalizadas) por índice efectivo de día.
+    _rm_cache = {}
+    def _get_R(b):
+        d_eff = min(start_day_idx + b, max_day)
+        if d_eff not in _rm_cache:
+            _, rm_pen = build_day_matrices(
+                rate_stack[d_eff], loads_stack[d_eff], distance_arr, diesel_arr
+            )
+            _rm_cache[d_eff] = np.array(rm_pen, dtype=float)
+        return _rm_cache[d_eff]
+
+    K = num_n  # pasos máximos (= num_n arcos: num_n-1 intermedios + retorno)
+
+    # Arcos permitidos: sin self-loops, factibles en tiempo, y que permitan retorno.
+    arcs = []
+    for i in range(num_n):
+        for j in range(num_n):
+            if i == j:
+                continue
+            if time_m[i, j] > max_d:
+                continue
+            # j intermedio: debe permitir volver al depósito
+            if j != start_node and time_m[i, j] + time_m[j, start_node] > max_d:
+                continue
+            arcs.append((i, j))
+
+    # ── Modelo ────────────────────────────────────────────────────────────────
+    prob = pulp.LpProblem(f"MIP_dynamic_s{start_node}_d{start_day_idx}", pulp.LpMaximize)
+
+    # Variables x[i,j,k]
+    x = {}
+    for (i, j) in arcs:
+        for k in range(K):
+            # En k=0 solo puede salir start_node; en k≥1 start_node no puede salir.
+            if k == 0 and i != start_node:
+                continue
+            if k >= 1 and i == start_node:
+                continue
+            # En k=K-1 el destino debe ser start_node.
+            if k == K - 1 and j != start_node:
+                continue
+            x[i, j, k] = pulp.LpVariable(f"x_{i}_{j}_{k}", cat='Binary')
+
+    # Variables z[k,b]
+    z = {}
+    for k in range(K):
+        for b in range(B):
+            z[k, b] = pulp.LpVariable(f"z_{k}_{b}", cat='Binary')
+
+    # Variables y[i,j,k,b] continuas en [0,1]
+    y = {}
+    for (k_var, xvar) in x.items():
+        i, j, k = k_var
+        for b in range(B):
+            y[i, j, k, b] = pulp.LpVariable(f"y_{i}_{j}_{k}_{b}", 0, 1, cat='Continuous')
+
+    # ── Objetivo ──────────────────────────────────────────────────────────────
+    prob += pulp.lpSum(
+        _get_R(b)[i, j] * y[i, j, k, b]
+        for (i, j, k, b) in y
+    )
+
+    # ── Restricciones ─────────────────────────────────────────────────────────
+
+    # 1. Anclaje al depósito: exactamente un arco desde start_node en k=0.
+    prob += (
+        pulp.lpSum(x[start_node, j, 0] for (si, j, k) in x if si == start_node and k == 0) == 1,
+        "depot_depart_k0"
+    )
+
+    # 2. Un arco por paso, sin huecos.
+    for k in range(K):
+        arcs_k = [(i, j) for (i, j, kk) in x if kk == k]
+        prob += (
+            pulp.lpSum(x[i, j, k] for (i, j) in arcs_k) <= 1,
+            f"one_arc_step_{k}"
+        )
+    for k in range(K - 1):
+        arcs_k  = [(i, j) for (i, j, kk) in x if kk == k]
+        arcs_k1 = [(i, j) for (i, j, kk) in x if kk == k + 1]
+        prob += (
+            pulp.lpSum(x[i, j, k + 1] for (i, j) in arcs_k1)
+            <= pulp.lpSum(x[i, j, k] for (i, j) in arcs_k),
+            f"no_gap_{k}"
+        )
+
+    # 3. Continuidad de flujo para nodos intermedios.
+    for j in range(num_n):
+        if j == start_node:
+            continue
+        for k in range(K - 1):
+            in_j_k  = [(i, j) for (i, jj, kk) in x if jj == j and kk == k]
+            out_j_k1 = [(j, l) for (jj, l, kk) in x if jj == j and kk == k + 1]
+            if in_j_k or out_j_k1:
+                prob += (
+                    pulp.lpSum(x[j, l, k + 1] for (_, l) in out_j_k1)
+                    == pulp.lpSum(x[i, j, k] for (i, _) in in_j_k),
+                    f"flow_{j}_{k}"
+                )
+
+    # 4. Retorno único al depósito.
+    in_depot = [(i, start_node, k) for (i, j, k) in x if j == start_node]
+    prob += (
+        pulp.lpSum(x[i, start_node, k] for (i, _, k) in in_depot) == 1,
+        "return_once"
+    )
+
+    # 5. Sin revisitas de nodos intermedios.
+    for j in range(num_n):
+        if j == start_node:
+            continue
+        arcs_to_j = [(i, j, k) for (i, jj, k) in x if jj == j]
+        if arcs_to_j:
+            prob += (
+                pulp.lpSum(x[i, j, k] for (i, _, k) in arcs_to_j) <= 1,
+                f"no_revisit_{j}"
+            )
+
+    # 6. Tiempo total.
+    prob += (
+        pulp.lpSum(time_m[i, j] * x[i, j, k] for (i, j, k) in x) <= max_d,
+        "time_limit"
+    )
+
+    # 7. Asignación de bucket con big-M = max_d.
+    M_bm = max_d
+    for k in range(K):
+        arcs_k = [(i, j) for (i, j, kk) in x if kk == k]
+        step_used = pulp.lpSum(x[i, j, k] for (i, j) in arcs_k)
+
+        # Σ_b z[k,b] = step_used (un bucket exactamente si el paso se usa)
+        prob += (
+            pulp.lpSum(z[k, b] for b in range(B)) == step_used,
+            f"bucket_assign_{k}"
+        )
+
+        # Tiempo acumulado al inicio del paso k: T_k = Σ_{k'<k} Σ_{i,j} time[i,j]*x[i,j,k']
+        T_k_expr = pulp.lpSum(
+            time_m[i, j] * x[i, j, kp]
+            for (i, j, kp) in x if kp < k
+        ) if k > 0 else 0
+
+        for b in range(B):
+            # T_k >= b * DAYS_PER_PERIOD - M*(1 - z[k,b])
+            prob += (
+                T_k_expr >= b * DAYS_PER_PERIOD - M_bm * (1 - z[k, b]),
+                f"bucket_lb_{k}_{b}"
+            )
+            # T_k <= (b+1)*DAYS_PER_PERIOD - ε + M*(1 - z[k,b])
+            prob += (
+                T_k_expr <= (b + 1) * DAYS_PER_PERIOD - MIP_FLOOR_EPS + M_bm * (1 - z[k, b]),
+                f"bucket_ub_{k}_{b}"
+            )
+
+    # 8. Linealización completa de y.
+    for (i, j, k, b) in y:
+        prob += (y[i, j, k, b] <= x[i, j, k],               f"y_le_x_{i}_{j}_{k}_{b}")
+        prob += (y[i, j, k, b] <= z[k, b],                   f"y_le_z_{i}_{j}_{k}_{b}")
+        prob += (y[i, j, k, b] >= x[i, j, k] + z[k, b] - 1, f"y_ge_xz_{i}_{j}_{k}_{b}")
+
+    # 9. Desigualdad válida: bucket no decreciente en pasos consecutivos.
+    for k in range(K - 1):
+        arcs_k  = [(i, j) for (i, j, kk) in x if kk == k]
+        arcs_k1 = [(i, j) for (i, j, kk) in x if kk == k + 1]
+        step_used_k1 = pulp.lpSum(x[i, j, k + 1] for (i, j) in arcs_k1)
+        prob += (
+            pulp.lpSum(b * z[k + 1, b] for b in range(B))
+            >= pulp.lpSum(b * z[k, b] for b in range(B)) - M_bm * (1 - step_used_k1),
+            f"bucket_nondec_{k}"
+        )
+
+    # ── Resolve ───────────────────────────────────────────────────────────────
+    solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit_s)
+    prob.solve(solver)
+
+    lp_status = pulp.LpStatus[prob.status]
+
+    # ── Post-procesamiento: reconstrucción de ruta ────────────────────────────
+    def _extract_route():
+        route = [start_node]
+        current = start_node
+        for k in range(K):
+            moved = False
+            for (i, j) in [(i, j) for (i, j, kk) in x if kk == k and i == current]:
+                if pulp.value(x[i, j, k]) is not None and pulp.value(x[i, j, k]) > 0.5:
+                    route.append(j)
+                    current = j
+                    moved = True
+                    break
+            if not moved or current == start_node:
+                break
+        return route
+
+    has_incumbente = prob.sol_status is not None and prob.sol_status >= 1
+
+    if not has_incumbente:
+        return MetaResult("Infeasible", None, -np.inf, np.inf)
+
+    route = _extract_route()
+
+    # Validación estructural
+    route_valid = (
+        len(route) >= 2
+        and route[0] == start_node
+        and route[-1] == start_node
+        and len(set(route[1:-1])) == len(route[1:-1])
+        and sum(time_m[route[p], route[p + 1]] for p in range(len(route) - 1)) <= max_d + 1e-6
+    )
+
+    if not route_valid:
+        status_out = "TimeLimit" if lp_status != 'Optimal' else "Infeasible"
+        return MetaResult(status_out, None, -np.inf, np.inf)
+
+    # Re-evaluación canónica obligatoria
+    canon_reward, canon_duration = simulate_route_reward(
+        route, start_node, start_day_idx,
+        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+        avail_prob_arr=None,
+    )
+
+    # Determinar status de salida
+    if lp_status == 'Optimal':
+        status_out = "Optimal"
+    else:
+        status_out = "TimeLimit"
+
+    # Verificación de paridad MIP vs canónica
+    mip_obj = pulp.value(prob.objective)
+    if mip_obj is not None and abs(mip_obj - canon_reward) > 1e-4:
+        import warnings as _w
+        _w.warn(
+            f"MIP obj ({mip_obj:.4f}) != canonical reward ({canon_reward:.4f}) "
+            f"| start_node={start_node} start_day_idx={start_day_idx} "
+            f"diff={abs(mip_obj - canon_reward):.2e}"
+        )
+
+    # Verificación de paridad de buckets
+    t_acc = 0.0
+    for step, (a, b_node) in enumerate(zip(route[:-1], route[1:])):
+        b_mip = _day_index(start_day_idx, t_acc, max_day) - start_day_idx
+        b_mip = max(0, min(b_mip, B - 1))
+        # bucket elegido por z
+        b_chosen = None
+        for b in range(B):
+            zval = pulp.value(z[step, b])
+            if zval is not None and zval > 0.5:
+                b_chosen = b
+                break
+        if b_chosen is not None and b_chosen != b_mip:
+            import warnings as _w
+            _w.warn(
+                f"BoundaryMismatch: start_node={start_node} start_day_idx={start_day_idx} "
+                f"step={step} T_k={t_acc:.6f} bucket_canonical={b_mip} bucket_mip={b_chosen}"
+            )
+            status_out = "BoundaryMismatch"
+        t_acc += time_m[a, b_node]
+
+    return MetaResult(status_out, route, canon_reward, canon_duration)
 
 
 def solve_heuristic_rolling_horizon_stochastic(
@@ -2381,16 +2144,13 @@ def solve_heuristic_rolling_horizon_stochastic(
     nodos cuya lane está bloqueada según draw_lane_availability (mundo Bernoulli).
     La evaluación final usa simulate_route_reward con avail_prob_arr.
     """
-    from problem_data import build_day_matrices, draw_lane_availability
+    from problem_data import draw_lane_availability
 
     num_days = rate_stack.shape[0]
-
-    def reward_matrix_for_time(t_elapsed):
-        day_idx = min(start_day_idx + int(t_elapsed // 14), num_days - 1)
-        _, rm_pen = build_day_matrices(
-            rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
-        )
-        return rm_pen
+    # DataFrame (as_numpy=False): indexa rm[current_node][next_node] como la
+    # versión greedy determinista, así que conserva ese tipo/acceso.
+    _get_rm = _make_rm_cache(rate_stack, loads_stack, distance_arr, diesel_arr,
+                             start_day_idx, num_days - 1, as_numpy=False)
 
     if hasattr(time_m, 'iloc'):
         time_m = np.array(time_m, dtype=float)
@@ -2403,8 +2163,8 @@ def solve_heuristic_rolling_horizon_stochastic(
     max_arcs = num_n - 1
 
     while steps < max_arcs:
-        rm = reward_matrix_for_time(time_elapsed)
-        current_arrival_day = min(start_day_idx + int(time_elapsed // 14), num_days - 1)
+        rm = _get_rm(time_elapsed)
+        current_arrival_day = _day_index(start_day_idx, time_elapsed, num_days - 1)
         lane_exists = draw_lane_availability(
             start_day_idx, node=current_node, arrival_day=current_arrival_day,
             avail_prob_arr=avail_prob_arr, num_nodes=num_n,
@@ -2437,21 +2197,9 @@ def solve_heuristic_rolling_horizon_stochastic(
         else:
             break
 
-    # Close cycle (time only — reward not accumulated here).
-    if route[-1] != start_node:
-        return_time = time_m[current_node][start_node]
-        if time_elapsed + return_time <= max_d:
-            time_elapsed += return_time
-            route.append(start_node)
-
-    if route[-1] != start_node or len(route) < 2:
-        return "Infeasible", route if len(route) > 1 else None, -np.inf, time_elapsed, False
-
-    total_reward, total_duration = simulate_route_reward(
-        route, start_node, start_day_idx,
-        time_m, rate_stack, loads_stack, distance_arr, diesel_arr,
+    # Cierre de ciclo + validación + evaluación canónica (helper compartido).
+    return _close_cycle_and_finalize(
+        route, current_node, time_elapsed, start_node, time_m, max_d,
+        start_day_idx, rate_stack, loads_stack, distance_arr, diesel_arr,
         avail_prob_arr=avail_prob_arr,
     )
-    is_valid = total_duration <= max_d
-    status = "Optimal" if is_valid else "Infeasible"
-    return status, route, total_reward, total_duration, is_valid

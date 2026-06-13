@@ -44,7 +44,7 @@ from config import DEVICE
 # Secuencia canónica de escalado
 # ─────────────────────────────────────────────────────────────────────────────
 
-NODE_SEQUENCE = [10, 20, 35, 50, 75, 97]
+NODE_SEQUENCE = [10, 20, 35, 50, 75, 100]
 
 
 def get_source_checkpoint(base_dir: str, target_num_nodes: int) -> str | None:

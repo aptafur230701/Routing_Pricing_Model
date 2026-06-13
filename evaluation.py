@@ -20,6 +20,7 @@ from config import (
     N_EVAL_EPISODES, N_DRL_REAL_SAMPLES, SEED, TRAIN_DAYS,
 )
 from problem_data import build_day_matrices
+from config import get_mip_time_limit
 from Solvers import (
     solve_HGA_LNS_metaheuristic,
     solve_heuristic_rolling_horizon,
@@ -27,7 +28,7 @@ from Solvers import (
     solve_heuristic_rolling_horizon_lookahead_stochastic,
     solve_heuristic_rolling_horizon_stochastic,
     solve_mc_rollout_stochastic,
-    solve_mip_exact,
+    solve_mip_dynamic,
     simulate_route_reward,
 )
 
@@ -70,21 +71,11 @@ def run_solver_comparison(agent, time_matrix,
                            rate_stack, loads_stack, distance_arr, diesel_arr,
                            num_nodes,
                            ltr_stack=None, trucks_stack=None, avail_prob_arr=None):
-    """Run DRL Real + DRL Det + HGA-LNS + RH-Greedy + MIP-Exact for every start node.
+    """Run DRL Real + DRL Det + HGA-LNS + RH-Greedy for every start node.
 
     Para cada nodo de inicio se usa un día del set de evaluación (días
     TRAIN_DAYS … total-1). Los índices se pre-generan con un RNG dedicado
     antes del loop para que no dependan del estado random del agente.
-
-    Comparación defensible
-    ----------------------
-    MIP-Exact resuelve el mundo *determinista* (sin filtrado Bernoulli) y es
-    una cota superior demostrable.  DRL Det evalúa la ruta del agente sobre
-    ese mismo mundo determinista (avail_prob_arr=None), garantizando que el
-    gap MIP-Exact − DRL Det sea siempre ≥ 0.
-
-    DRL Real se conserva como referencia estocástica pero NO se usa para el
-    gap central de tesis.
     """
     results          = []
     drl_real_times   = []
@@ -95,7 +86,7 @@ def run_solver_comparison(agent, time_matrix,
     rh_stoch_times   = []
     rh_lookahead_stoch_times = []
     mc_rollout_times = []
-    mip_exact_times  = []
+    mip_times        = []
     num_days         = rate_stack.shape[0]
 
     rng         = np.random.default_rng(SEED)
@@ -103,14 +94,17 @@ def run_solver_comparison(agent, time_matrix,
 
     time_matrix_np = np.array(time_matrix, dtype=float)
 
+    mip_time_limit = get_mip_time_limit(num_nodes)
+
     print("\n--- Solver Comparison (eval set) ---")
     print(f"Eval days: {num_days} | absolute range: [{TRAIN_DAYS}, {TRAIN_DAYS + num_days - 1}]")
+    print(f"MIP time limit: {mip_time_limit}s/instancia")
     print(f"Day assignments per node: {day_indices.tolist()}\n")
 
     for s in range(num_nodes):
         day_idx     = int(day_indices[s])
         abs_day_idx = TRAIN_DAYS + day_idx
-        print(f"\nStart node {s} | eval day {day_idx} (abs day {abs_day_idx})")
+        print(f"\nStart node {s}/{num_nodes-1} | eval day {day_idx} (abs day {abs_day_idx})", flush=True)
         row = {'Start Node': s, 'Eval Day Index': day_idx, 'Abs Day Index': abs_day_idx}
 
         # ── DRL Real — mejor de N_DRL_REAL_SAMPLES rollouts estocásticos ────
@@ -133,12 +127,12 @@ def run_solver_comparison(agent, time_matrix,
             'DRL Real Duration': drl_real_duration if drl_real_valid else np.inf,
             'DRL Real Valid':    drl_real_valid,
         })
-        print(f"  DRL Real:  {drl_real_route} | reward {drl_real_reward:.1f} (estocástico)")
+        _p_drl_real = f"  DRL Real:       {drl_real_route} | reward {drl_real_reward:.1f}"
 
         # ── DRL Det — ruta construida y evaluada sin Bernoulli ───────────────
         # avail_prob_arr=None desactiva el filtrado de lanes en beam_search_dynamic.
         # El reward se recomputa explícitamente con simulate_route_reward para
-        # garantizar paridad bit-a-bit con el mundo determinista del MIP-Exact.
+        # garantizar paridad bit-a-bit con el mundo determinista.
         t0 = time.time()
         drl_det_route, _, drl_det_duration_raw = rollout_drl_env(
             agent, s, day_idx,
@@ -162,7 +156,7 @@ def run_solver_comparison(agent, time_matrix,
             'DRL Det Duration': drl_det_duration if drl_det_valid else np.inf,
             'DRL Det Valid':    drl_det_valid,
         })
-        print(f"  DRL Det:   {drl_det_route} | reward {drl_det_reward:.1f} (determinista)")
+        _p_drl_det = f"  DRL Det:        {drl_det_route} | reward {drl_det_reward:.1f}"
 
         # ── RH-Greedy — greedy miope con día dinámico ────────────────────────
         t0 = time.time()
@@ -179,7 +173,7 @@ def run_solver_comparison(agent, time_matrix,
             'RH-Greedy Duration': rh_duration if rh_route else np.inf,
             'RH-Greedy Valid':    rh_valid,
         })
-        print(f"  RH-Greedy: {rh_route} | reward {rh_reward:.1f}")
+        _p_rh_greedy = f"  RH-Greedy:      {rh_route} | reward {rh_reward:.1f}"
 
         # ── RH-Lookahead — rolling horizon con lookahead determinista ─────────
         t0 = time.time()
@@ -196,7 +190,7 @@ def run_solver_comparison(agent, time_matrix,
             'RH-Lookahead Duration': rhl_duration if rhl_route else np.inf,
             'RH-Lookahead Valid':    rhl_valid,
         })
-        print(f"  RH-Lookahead: {rhl_route} | reward {rhl_reward:.1f}")
+        _p_rh_lookahead = f"  RH-Lookahead:   {rhl_route} | reward {rhl_reward:.1f}"
 
         # ── RH-Greedy Real — greedy miope en mundo estocástico ───────────────
         t0 = time.time()
@@ -213,7 +207,7 @@ def run_solver_comparison(agent, time_matrix,
             'RH-Greedy Real Duration': rh_stoch_duration if rh_stoch_route else np.inf,
             'RH-Greedy Real Valid':    rh_stoch_valid,
         })
-        print(f"  RH-Greedy Real: {rh_stoch_route} | reward {rh_stoch_reward:.1f} (estocástico)")
+        _p_rh_greedy_real = f"  RH-Greedy Real: {rh_stoch_route} | reward {rh_stoch_reward:.1f}"
 
         # ── RH-Lookahead Real — lookahead en mundo estocástico ────────────────
         t0 = time.time()
@@ -230,7 +224,7 @@ def run_solver_comparison(agent, time_matrix,
             'RH-Lookahead Real Duration': rhlr_duration if rhlr_route else np.inf,
             'RH-Lookahead Real Valid':    rhlr_valid,
         })
-        print(f"  RH-Lookahead Real: {rhlr_route} | reward {rhlr_reward:.1f} (estocástico)")
+        _p_rh_lookahead_real = f"  RH-Lookahead Real: {rhlr_route} | reward {rhlr_reward:.1f}"
 
         # ── MC-Rollout estocástico ────────────────────────────────────────────
         t0 = time.time()
@@ -247,9 +241,10 @@ def run_solver_comparison(agent, time_matrix,
             'MC-Rollout Duration': mc_duration if mc_route else np.inf,
             'MC-Rollout Valid':    mc_valid,
         })
-        print(f"  MC-Rollout: {mc_route} | reward {mc_reward:.1f} (estocástico)")
+        _p_mc_rollout = f"  MC-Rollout:     {mc_route} | reward {mc_reward:.1f}"
 
         # ── HGA-LNS ──────────────────────────────────────────────────────────
+        print(f"  [HGA-LNS]...", end=" ", flush=True)
         t0 = time.time()
         hga_status, hga_route, hga_reward, hga_duration = solve_HGA_LNS_metaheuristic(
             s, time_matrix, MAX_DURATION, num_nodes,
@@ -259,6 +254,7 @@ def run_solver_comparison(agent, time_matrix,
             seed=SEED + s,
         )
         hga_lns_times.append(time.time() - t0)
+        print(f"{hga_lns_times[-1]:.1f}s", flush=True)
         row.update({
             'HGA-LNS Status':   hga_status,
             'HGA-LNS Route':    hga_route,
@@ -266,53 +262,41 @@ def run_solver_comparison(agent, time_matrix,
             'HGA-LNS Duration': hga_duration if hga_status == 'Optimal' else np.inf,
             'HGA-LNS Valid':    hga_status == 'Optimal' and hga_route is not None,
         })
-        print(f"  HGA-LNS:   {hga_route} | reward {hga_reward:.1f}")
+        _p_hga_lns = f"  HGA-LNS:        {hga_route} | reward {hga_reward:.1f}"
 
-        # ── MIP-Exact — cota óptima determinista demostrable ─────────────────
+        # ── MIP exacto determinista ───────────────────────────────────────────
+        print(f"  [MIP limit={mip_time_limit}s]...", end=" ", flush=True)
         t0 = time.time()
-        mip_status, mip_route, mip_reward, mip_duration = solve_mip_exact(
-            start_node     = s,
-            time_matrix_np = time_matrix_np,
-            rate_stack     = rate_stack,
-            loads_stack    = loads_stack,
-            distance_arr   = distance_arr,
-            diesel_arr     = diesel_arr,
-            max_d          = MAX_DURATION,
-            num_n          = num_nodes,
-            start_day_idx  = day_idx,
-            avail_prob_arr = avail_prob_arr,   # aceptado e ignorado
+        mip_result = solve_mip_dynamic(
+            s, time_matrix, rate_stack, loads_stack,
+            distance_arr, diesel_arr, MAX_DURATION, num_nodes,
+            start_day_idx=day_idx,
+            time_limit_s=mip_time_limit,
         )
-        mip_exact_times.append(time.time() - t0)
-        mip_valid = (mip_route is not None and len(mip_route) > 1
-                     and mip_route[0] == mip_route[-1])
+        mip_times.append(time.time() - t0)
+        print(f"{mip_times[-1]:.1f}s", flush=True)
+        mip_status, mip_route, mip_reward, mip_duration = mip_result
+        mip_valid = mip_status == 'Optimal' and mip_route is not None
         row.update({
-            'MIP-Exact Status':   mip_status,
-            'MIP-Exact Route':    mip_route,
-            'MIP-Exact Reward':   mip_reward   if mip_valid else -np.inf,
-            'MIP-Exact Duration': mip_duration if mip_valid else np.inf,
-            'MIP-Exact Valid':    mip_valid,
+            'MIP Status':   mip_status,
+            'MIP Route':    mip_route,
+            'MIP Reward':   mip_reward   if mip_valid else -np.inf,
+            'MIP Duration': mip_duration if mip_valid else np.inf,
+            'MIP Valid':    mip_valid,
         })
-        print(f"  MIP-Exact: {mip_route} | reward {mip_reward:.1f} (determinista, óptimo)")
+        _p_mip = f"  MIP:            {mip_route} | reward {mip_reward:.1f} | status {mip_status}"
 
-        # ── Gaps vs MIP-Exact (mundo determinista — métrica central de tesis) ─
-        def mip_gap(solver_r, solver_valid):
-            if mip_valid and solver_valid and abs(mip_reward) > 1e-6:
-                return ((mip_reward - solver_r) / abs(mip_reward)) * 100
-            return float('nan')
-
-        row['MIP-Exact Gap vs DRL Det (%)']        = mip_gap(row['DRL Det Reward'],      row['DRL Det Valid'])
-        row['MIP-Exact Gap vs DRL Real (%)']       = mip_gap(row['DRL Real Reward'],     row['DRL Real Valid'])
-        row['MIP-Exact Gap vs RH-Greedy (%)']      = mip_gap(row['RH-Greedy Reward'],    row['RH-Greedy Valid'])
-        row['MIP-Exact Gap vs RH-Lookahead (%)']   = mip_gap(row['RH-Lookahead Reward'], row['RH-Lookahead Valid'])
-        row['MIP-Exact Gap vs HGA-LNS (%)']        = mip_gap(row['HGA-LNS Reward'],      row['HGA-LNS Valid'])
-        row['MIP-Exact Gap vs MC-Rollout (%)']     = mip_gap(row['MC-Rollout Reward'],   row['MC-Rollout Valid'])
-
-        # Sanity check: MIP-Exact debe ser cota superior del DRL Det
-        if (mip_valid and drl_det_valid
-                and drl_det_reward > mip_reward + 1.0):   # tolerancia de redondeo
-            print(f"  [BUG] DRL Det ({drl_det_reward:.1f}) supera MIP-Exact "
-                  f"({mip_reward:.1f}) en {drl_det_reward - mip_reward:.1f} unidades "
-                  f"para start={s}, day={day_idx}")
+        print("  -- Determinísticos --")
+        print(_p_drl_det)
+        print(_p_rh_greedy)
+        print(_p_rh_lookahead)
+        print(_p_hga_lns)
+        print(_p_mip)
+        print("  -- Estocásticos --")
+        print(_p_drl_real)
+        print(_p_rh_greedy_real)
+        print(_p_rh_lookahead_real)
+        print(_p_mc_rollout)
 
         results.append(row)
 
@@ -327,7 +311,7 @@ def run_solver_comparison(agent, time_matrix,
         'rh_stoch_times':             rh_stoch_times,
         'rh_lookahead_stoch_times':   rh_lookahead_stoch_times,
         'mc_rollout_times':           mc_rollout_times,
-        'mip_exact_times':   mip_exact_times,
+        'mip_times':                  mip_times,
     }
     return df, timing
 
@@ -422,32 +406,26 @@ def plot_diagnostics(episode_rewards, episode_losses, results_df,
                      if 'DRL Det Valid' in results_df.columns
                      and results_df.loc[results_df['Start Node'] == n, 'DRL Det Valid'].values[0] else 0
                      for n in nodes]
-        mip_exact_r = [results_df.loc[results_df['Start Node'] == n, 'MIP-Exact Reward'].values[0]
-                       if results_df.loc[results_df['Start Node'] == n, 'MIP-Exact Valid'].values[0] else 0
-                       for n in nodes]
+        hga_r = [results_df.loc[results_df['Start Node'] == n, 'HGA-LNS Reward'].values[0]
+                 if results_df.loc[results_df['Start Node'] == n, 'HGA-LNS Valid'].values[0] else 0
+                 for n in nodes]
         x     = np.arange(num_nodes); w = 0.35
-        ax3.bar(x - w/2, mip_exact_r, w, label='MIP-Exact', color='forestgreen', alpha=0.8)
-        ax3.bar(x + w/2, drl_det_r,   w, label='DRL Det',   color='steelblue',   alpha=0.8)
-        ax3.set_title('DRL Det vs MIP-Exact per start node')
+        ax3.bar(x - w/2, hga_r,     w, label='HGA-LNS', color='forestgreen', alpha=0.8)
+        ax3.bar(x + w/2, drl_det_r, w, label='DRL Det',  color='steelblue',   alpha=0.8)
+        ax3.set_title('DRL Det vs HGA-LNS per start node')
         ax3.set_xlabel('Start node'); ax3.set_ylabel('Reward')
         ax3.set_xticks(x); ax3.legend(); ax3.grid(True, alpha=0.3)
 
-        ax4      = axes[1, 1]
-        gap_col  = 'MIP-Exact Gap vs DRL Det (%)'
-        if gap_col in results_df.columns:
-            gap_data = results_df.loc[
-                results_df['MIP-Exact Valid'] & results_df['DRL Det Valid'], gap_col
-            ].dropna()
-        else:
-            gap_data = pd.Series(dtype=float)
-        if len(gap_data) > 0:
-            ax4.bar(range(len(gap_data)), gap_data.values, color='salmon', alpha=0.8)
-            ax4.axhline(gap_data.mean(), color='red', linestyle='--',
-                        label=f'Avg: {gap_data.mean():.1f}%')
-            ax4.legend()
-        ax4.set_title('DRL Det optimality gap vs MIP-Exact (%)')
-        ax4.set_xlabel('Start node'); ax4.set_ylabel('Gap (%)')
-        ax4.grid(True, alpha=0.3)
+        ax4 = axes[1, 1]
+        drl_real_r = [results_df.loc[results_df['Start Node'] == n, 'DRL Real Reward'].values[0]
+                      if 'DRL Real Valid' in results_df.columns
+                      and results_df.loc[results_df['Start Node'] == n, 'DRL Real Valid'].values[0] else 0
+                      for n in nodes]
+        ax4.bar(x - w/2, drl_real_r, w, label='DRL Real', color='coral',     alpha=0.8)
+        ax4.bar(x + w/2, drl_det_r,  w, label='DRL Det',  color='steelblue', alpha=0.8)
+        ax4.set_title('DRL Real vs DRL Det per start node')
+        ax4.set_xlabel('Start node'); ax4.set_ylabel('Reward')
+        ax4.set_xticks(x); ax4.legend(); ax4.grid(True, alpha=0.3)
 
         plt.tight_layout()
         plt.savefig(output_path, dpi=150)

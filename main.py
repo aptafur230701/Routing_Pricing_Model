@@ -129,29 +129,10 @@ def _evaluate_and_report(
         mask = results_df[valid_col]
         return results_df.loc[mask, col].mean() if mask.any() else float("nan")
 
-    def _gap_series(gap_col, solver_valid_col):
-        return results_df.loc[
-            results_df["MIP-Exact Valid"] & results_df[solver_valid_col], gap_col
-        ].dropna()
-
-    drl_gap     = _gap_series("MIP-Exact Gap vs DRL Real (%)",      "DRL Real Valid")
-    drl_det_gap = _gap_series("MIP-Exact Gap vs DRL Det (%)",       "DRL Det Valid")
-    hga_gap     = _gap_series("MIP-Exact Gap vs HGA-LNS (%)",       "HGA-LNS Valid")
-    rh_gap      = _gap_series("MIP-Exact Gap vs RH-Greedy (%)",     "RH-Greedy Valid")
-    rhl_gap     = _gap_series("MIP-Exact Gap vs RH-Lookahead (%)",  "RH-Lookahead Valid")
-    mc_gap      = _gap_series("MIP-Exact Gap vs MC-Rollout (%)",    "MC-Rollout Valid")
-
     def _gap_stats(series):
         if len(series) > 0:
             return series.mean(), series.max()
         return float("nan"), float("nan")
-
-    drl_avg_gap,     drl_max_gap     = _gap_stats(drl_gap)
-    drl_det_avg_gap, drl_det_max_gap = _gap_stats(drl_det_gap)
-    hga_avg_gap,     hga_max_gap     = _gap_stats(hga_gap)
-    rh_avg_gap,      rh_max_gap      = _gap_stats(rh_gap)
-    rhl_avg_gap,     rhl_max_gap     = _gap_stats(rhl_gap)
-    mc_avg_gap,      mc_max_gap      = _gap_stats(mc_gap)
 
     both_valid = results_df["DRL Det Valid"] & results_df["DRL Real Valid"]
     real_vs_det_series = results_df.loc[both_valid].apply(
@@ -159,6 +140,50 @@ def _evaluate_and_report(
         if r["DRL Det Reward"] != 0 else float("nan"), axis=1
     ).dropna()
     real_vs_det_avg, _ = _gap_stats(real_vs_det_series)
+
+    # ── Gaps de optimalidad vs MIP ────────────────────────────────────────────
+    def _mip_gap_series(method_reward_col, method_valid_col):
+        """(MIP - Method) / |MIP| * 100, solo donde ambos son válidos y MIP≠0."""
+        mask = results_df["MIP Valid"] & results_df[method_valid_col]
+        def _gap(r):
+            if r["MIP Reward"] == 0:
+                return float("nan")
+            return (r["MIP Reward"] - r[method_reward_col]) / abs(r["MIP Reward"]) * 100
+        return results_df.loc[mask].apply(_gap, axis=1).dropna()
+
+    gap_drl_det_series   = _mip_gap_series("DRL Det Reward",    "DRL Det Valid")
+    gap_hga_series       = _mip_gap_series("HGA-LNS Reward",    "HGA-LNS Valid")
+    gap_rh_greedy_series = _mip_gap_series("RH-Greedy Reward",  "RH-Greedy Valid")
+    gap_rh_lh_series     = _mip_gap_series("RH-Lookahead Reward", "RH-Lookahead Valid")
+
+    gap_drl_det_avg,   gap_drl_det_max   = _gap_stats(gap_drl_det_series)
+    gap_hga_avg,       gap_hga_max       = _gap_stats(gap_hga_series)
+    gap_rh_greedy_avg, gap_rh_greedy_max = _gap_stats(gap_rh_greedy_series)
+    gap_rh_lh_avg,     gap_rh_lh_max     = _gap_stats(gap_rh_lh_series)
+
+    # Sanidad: ningún determinista debe superar al MIP (cuando MIP Valid).
+    _sanity_mask = results_df["MIP Valid"]
+    _violations = []
+    for _col, _vcol in [
+        ("DRL Det Reward",      "DRL Det Valid"),
+        ("HGA-LNS Reward",      "HGA-LNS Valid"),
+        ("RH-Greedy Reward",    "RH-Greedy Valid"),
+        ("RH-Lookahead Reward", "RH-Lookahead Valid"),
+    ]:
+        _m = _sanity_mask & results_df[_vcol]
+        _bad = results_df.loc[_m & (results_df[_col] > results_df["MIP Reward"] + 1e-6)]
+        for _, _row in _bad.iterrows():
+            _violations.append(
+                f"node={int(_row['Start Node'])} day={int(_row['Eval Day Index'])} "
+                f"method={_col} val={_row[_col]:.4f} mip={_row['MIP Reward']:.4f}"
+            )
+    if _violations:
+        print("\n  *** SANITY WARNING: deterministic solver exceeded MIP bound! ***")
+        for _v in _violations:
+            print(f"    {_v}")
+
+    mip_optimal_count  = int(results_df["MIP Valid"].sum()) if "MIP Valid" in results_df else 0
+    mip_timelimit_count = int((results_df["MIP Status"] == "TimeLimit").sum()) if "MIP Status" in results_df else 0
 
     drl_vs_rh_stoch_valid = results_df["DRL Real Valid"] & results_df["RH-Greedy Real Valid"]
     drl_vs_rh_stoch_series = results_df.loc[drl_vs_rh_stoch_valid].apply(
@@ -187,11 +212,11 @@ def _evaluate_and_report(
     print(f"  SUMMARY — {NUM_NODES} nodes  [{label}]")
     print(f"{'='*60}")
     print(f"\n  Bloque 1 — Mundo determinista (comparación principal)")
-    print(f"  MIP-Exact avg reward : {avg_valid('MIP-Exact Reward', 'MIP-Exact Valid'):>10.1f}  [cota superior]")
-    print(f"  DRL Det avg reward   : {avg_valid('DRL Det Reward', 'DRL Det Valid'):>10.1f}  | gap vs MIP: avg {drl_det_avg_gap:.2f}%  max {drl_det_max_gap:.2f}%")
-    print(f"  HGA-LNS avg reward     : {avg_valid('HGA-LNS Reward', 'HGA-LNS Valid'):>10.1f}  | gap vs MIP: avg {hga_avg_gap:.2f}%  max {hga_max_gap:.2f}%")
-    print(f"  RH-Greedy avg reward   : {avg_valid('RH-Greedy Reward', 'RH-Greedy Valid'):>10.1f}  | gap vs MIP: avg {rh_avg_gap:.2f}%  max {rh_max_gap:.2f}%")
-    print(f"  RH-Lookahead avg reward: {avg_valid('RH-Lookahead Reward', 'RH-Lookahead Valid'):>10.1f}  | gap vs MIP: avg {rhl_avg_gap:.2f}%  max {rhl_max_gap:.2f}%")
+    print(f"  MIP avg reward         : {avg_valid('MIP Reward', 'MIP Valid'):>10.1f}  | Optimal: {mip_optimal_count}  TimeLimit: {mip_timelimit_count}")
+    print(f"  DRL Det avg reward     : {avg_valid('DRL Det Reward', 'DRL Det Valid'):>10.1f}  | gap vs MIP avg {gap_drl_det_avg:.1f}%  max {gap_drl_det_max:.1f}%")
+    print(f"  HGA-LNS avg reward     : {avg_valid('HGA-LNS Reward', 'HGA-LNS Valid'):>10.1f}  | gap vs MIP avg {gap_hga_avg:.1f}%  max {gap_hga_max:.1f}%")
+    print(f"  RH-Greedy avg reward   : {avg_valid('RH-Greedy Reward', 'RH-Greedy Valid'):>10.1f}  | gap vs MIP avg {gap_rh_greedy_avg:.1f}%  max {gap_rh_greedy_max:.1f}%")
+    print(f"  RH-Lookahead avg reward: {avg_valid('RH-Lookahead Reward', 'RH-Lookahead Valid'):>10.1f}  | gap vs MIP avg {gap_rh_lh_avg:.1f}%  max {gap_rh_lh_max:.1f}%")
     print(f"\n  Bloque 2 — Costo de ejecución estocástica")
     print(f"  DRL Real avg reward      : {avg_valid('DRL Real Reward', 'DRL Real Valid'):>10.1f}  | gap vs DRL Det: avg ~{real_vs_det_avg:.1f}%")
     print(f"  RH-Greedy Real avg reward     : {avg_valid('RH-Greedy Real Reward', 'RH-Greedy Real Valid'):>10.1f}")
@@ -203,12 +228,12 @@ def _evaluate_and_report(
     print(f"\n  Bloque 3 — Tiempo de inferencia")
     print(f"  DRL (Det+Real) : {drl_both_ms:>6.0f} ms")
     print(f"  HGA-LNS        : {np.mean(timing['hga_lns_times'])*1000:>6.0f} ms")
-    print(f"  MIP-Exact      : {np.mean(timing['mip_exact_times'])*1000:>6.0f} ms")
     print(f"  RH-Greedy      : {np.mean(timing['rh_greedy_times'])*1000:>6.0f} ms")
     print(f"  RH-Lookahead   : {np.mean(timing['rh_lookahead_times'])*1000:>6.0f} ms")
     print(f"  RH-Greedy Real : {np.mean(timing['rh_stoch_times'])*1000:>6.0f} ms")
     print(f"  RH-Lookahead Real: {np.mean(timing['rh_lookahead_stoch_times'])*1000:>6.0f} ms")
     print(f"  MC-Rollout       : {np.mean(timing['mc_rollout_times'])*1000:>6.0f} ms")
+    print(f"  MIP              : {np.mean(timing['mip_times'])*1000:>6.0f} ms")
     print(f"  Training time  : {train_time:.1f} s")
     print(f"{'='*60}")
 
@@ -216,11 +241,22 @@ def _evaluate_and_report(
     summary_rows.append({
         "Model":                           label,
         "Node Size":                       NUM_NODES,
-        "MIP-Exact Avg Reward":            avg_valid("MIP-Exact Reward", "MIP-Exact Valid"),
+        "MIP Avg Reward":                  avg_valid("MIP Reward", "MIP Valid"),
+        "MIP Optimal Count":               mip_optimal_count,
+        "MIP Avg Inference (ms)":          np.mean(timing["mip_times"]) * 1000,
+        "DRL Det Avg Reward":              avg_valid("DRL Det Reward", "DRL Det Valid"),
+        "DRL Det Gap vs MIP Avg (%)":      gap_drl_det_avg,
+        "DRL Det Gap vs MIP Max (%)":      gap_drl_det_max,
         "DRL Real Avg Reward":             avg_valid("DRL Real Reward",  "DRL Real Valid"),
         "HGA-LNS Avg Reward":              avg_valid("HGA-LNS Reward",   "HGA-LNS Valid"),
+        "HGA-LNS Gap vs MIP Avg (%)":      gap_hga_avg,
+        "HGA-LNS Gap vs MIP Max (%)":      gap_hga_max,
         "RH-Greedy Avg Reward":            avg_valid("RH-Greedy Reward",    "RH-Greedy Valid"),
+        "RH-Greedy Gap vs MIP Avg (%)":    gap_rh_greedy_avg,
+        "RH-Greedy Gap vs MIP Max (%)":    gap_rh_greedy_max,
         "RH-Lookahead Avg Reward":         avg_valid("RH-Lookahead Reward", "RH-Lookahead Valid"),
+        "RH-Lookahead Gap vs MIP Avg (%)": gap_rh_lh_avg,
+        "RH-Lookahead Gap vs MIP Max (%)": gap_rh_lh_max,
         "RH-Greedy Real Avg Reward":                    avg_valid("RH-Greedy Real Reward",    "RH-Greedy Real Valid"),
         "RH-Lookahead Real Avg Reward":                 avg_valid("RH-Lookahead Real Reward", "RH-Lookahead Real Valid"),
         "DRL Real Advantage vs RH-Greedy Real (%)":     drl_vs_rh_stoch_avg,
@@ -229,20 +265,9 @@ def _evaluate_and_report(
         "DRL Real Avg Inference (ms)":     np.mean(timing["drl_real_times"]) * 1000,
         "HGA-LNS Avg Inference (ms)":      np.mean(timing["hga_lns_times"])  * 1000,
         "RH-Greedy Avg Inference (ms)":    np.mean(timing["rh_greedy_times"]) * 1000,
-        "MIP-Exact Avg Inference (ms)":        np.mean(timing["mip_exact_times"]) * 1000,
-        "DRL Real Avg Gap vs MIP-Exact (%)":   drl_avg_gap,
-        "DRL Real Max Gap vs MIP-Exact (%)":   drl_max_gap,
-        "HGA-LNS Avg Gap vs MIP-Exact (%)":    hga_avg_gap,
-        "HGA-LNS Max Gap vs MIP-Exact (%)":    hga_max_gap,
-        "RH-Greedy Avg Gap vs MIP-Exact (%)":      rh_avg_gap,
-        "RH-Greedy Max Gap vs MIP-Exact (%)":      rh_max_gap,
-        "RH-Lookahead Avg Gap vs MIP-Exact (%)":   rhl_avg_gap,
-        "RH-Lookahead Max Gap vs MIP-Exact (%)":   rhl_max_gap,
         "RH-Lookahead Avg Inference (ms)":              np.mean(timing["rh_lookahead_times"]) * 1000,
         "RH-Lookahead Real Avg Inference (ms)":         np.mean(timing["rh_lookahead_stoch_times"]) * 1000,
         "MC-Rollout Avg Reward":                         avg_valid("MC-Rollout Reward", "MC-Rollout Valid"),
-        "MC-Rollout Avg Gap vs MIP-Exact (%)":           mc_avg_gap,
-        "MC-Rollout Max Gap vs MIP-Exact (%)":           mc_max_gap,
         "MC-Rollout Avg Inference (ms)":                 np.mean(timing["mc_rollout_times"]) * 1000,
         "DRL Real Advantage vs MC-Rollout (%)":          drl_vs_mc_avg,
     })

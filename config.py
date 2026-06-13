@@ -60,6 +60,20 @@ SEED = 42
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+# ── MIP exact baseline ────────────────────────────────────
+MIP_FLOOR_EPS    = 1e-6       # ε para la desigualdad estricta del floor de bucket
+                               # (desplaza el límite superior del bucket un ε hacia
+                               #  abajo para que T_k en el borde exacto de un múltiplo
+                               #  de DAYS_PER_PERIOD caiga en el bucket correcto)
+
+def get_mip_time_limit(num_nodes: int) -> int:
+    """Tiempo límite CBC por instancia, escalado al tamaño del problema."""
+    if num_nodes <= 10:  return 120   # MIP pequeño — 2 min es más que suficiente
+    if num_nodes <= 20:  return 60    # MIP mediano — 1 min (≈ 20 min total eval)
+    if num_nodes <= 35:  return 45
+    return 30
+
+
 def get_episodes_per_node(num_nodes: int) -> int:
     """Episodes per start-node for the full training run."""
     if num_nodes <= 10:  return 5000
@@ -67,7 +81,7 @@ def get_episodes_per_node(num_nodes: int) -> int:
     if num_nodes <= 35:  return 6500
     if num_nodes <= 50:  return 7000
     if num_nodes <= 75:  return 7500
-    return 8000          # 97 nodos
+    return 8000          # 100 nodos
 
 
 def get_beam_width(num_nodes: int) -> int:
