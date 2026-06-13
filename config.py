@@ -67,11 +67,16 @@ MIP_FLOOR_EPS    = 1e-6       # ε para la desigualdad estricta del floor de buc
                                #  de DAYS_PER_PERIOD caiga en el bucket correcto)
 
 def get_mip_time_limit(num_nodes: int) -> int:
-    """Tiempo límite CBC por instancia, escalado al tamaño del problema."""
-    if num_nodes <= 10:  return 120   # MIP pequeño — 2 min es más que suficiente
-    if num_nodes <= 20:  return 60    # MIP mediano — 1 min (≈ 20 min total eval)
-    if num_nodes <= 35:  return 45
-    return 30
+    """Tiempo límite HiGHS por instancia, calibrado experimentalmente.
+
+    HiGHS necesita ~120s de presolving para N=20 antes de encontrar la primera
+    solución factible; con 300s llega al ~97% del óptimo en la mayoría de instancias.
+    N=10 converge en <30s con HiGHS, pero se conserva 120s como margen.
+    """
+    if num_nodes <= 10:  return 120   # HiGHS cierra en <30s; 120s es margen amplio
+    if num_nodes <= 20:  return 420   # HiGHS necesita ~365s para probar optimalidad; 420s da margen
+    if num_nodes <= 35:  return 120
+    return 60
 
 
 def get_episodes_per_node(num_nodes: int) -> int:

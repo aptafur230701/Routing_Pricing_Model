@@ -277,6 +277,24 @@ def run_solver_comparison(agent, time_matrix,
         print(f"{mip_times[-1]:.1f}s", flush=True)
         mip_status, mip_route, mip_reward, mip_duration = mip_result
         mip_valid = mip_status == 'Optimal' and mip_route is not None
+
+        # Dominance guard (§5.3): ningún solver determinista puede superar al MIP
+        # si éste reporta Optimal.  Si ocurre, el status se degrada a TimeLimit.
+        if mip_valid:
+            _det_rewards = {
+                'DRL Det':     (drl_det_reward,  drl_det_valid),
+                'RH-Greedy':   (rh_reward,        rh_valid),
+                'RH-Lookahead':(rhl_reward,       rhl_valid),
+                'HGA-LNS':     (hga_reward,       hga_status == 'Optimal'),
+            }
+            for _name, (_r, _v) in _det_rewards.items():
+                if _v and _r > mip_reward + 1e-3:
+                    print(f"  *** DOMINANCE FAIL: {_name} ({_r:.1f}) > MIP ({mip_reward:.1f})"
+                          f" — degradando a TimeLimit ***", flush=True)
+                    mip_status = 'TimeLimit'
+                    mip_valid  = False
+                    break
+
         row.update({
             'MIP Status':   mip_status,
             'MIP Route':    mip_route,

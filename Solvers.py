@@ -2046,10 +2046,30 @@ def solve_mip_dynamic(
         )
 
     # ── Resolve ───────────────────────────────────────────────────────────────
-    solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit_s)
-    prob.solve(solver)
+    # Preferimos HiGHS vía API Python (mucho más rápido que CBC); caemos a CBC si no está.
+    _highs = pulp.HiGHS(msg=False, timeLimit=time_limit_s)
+    solver = _highs if _highs.available() else pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit_s)
 
-    lp_status = pulp.LpStatus[prob.status]
+    import time as _time
+    _t0_solve = _time.time()
+    prob.solve(solver)
+    _wall_solve = _time.time() - _t0_solve
+
+    # ── Detección de status robusta ────────────────────────────────────────────
+    # prob.sol_status == 1  → LpSolutionOptimal (optimalidad probada)
+    # prob.sol_status == 2  → LpSolutionIntegerFeasible (factible, no probado óptimo)
+    # Cualquier otro valor → sin solución entera usable
+    _OPTIMAL_SOL  = 1   # pulp.constants.LpSolutionOptimal
+    _FEASIBLE_SOL = 2   # pulp.constants.LpSolutionIntegerFeasible
+
+    has_incumbente = prob.sol_status in (_OPTIMAL_SOL, _FEASIBLE_SOL)
+
+    # Si el solver agotó el tiempo, la solución es factible pero NO es cota superior.
+    hit_time_limit = (
+        time_limit_s is not None and _wall_solve >= time_limit_s * 0.98
+    ) or prob.sol_status == _FEASIBLE_SOL
+
+    truly_optimal = has_incumbente and not hit_time_limit
 
     # ── Post-procesamiento: reconstrucción de ruta ────────────────────────────
     def _extract_route():
@@ -2067,8 +2087,6 @@ def solve_mip_dynamic(
                 break
         return route
 
-    has_incumbente = prob.sol_status is not None and prob.sol_status >= 1
-
     if not has_incumbente:
         return MetaResult("Infeasible", None, -np.inf, np.inf)
 
@@ -2084,8 +2102,7 @@ def solve_mip_dynamic(
     )
 
     if not route_valid:
-        status_out = "TimeLimit" if lp_status != 'Optimal' else "Infeasible"
-        return MetaResult(status_out, None, -np.inf, np.inf)
+        return MetaResult("TimeLimit", None, -np.inf, np.inf)
 
     # Re-evaluación canónica obligatoria
     canon_reward, canon_duration = simulate_route_reward(
@@ -2094,11 +2111,7 @@ def solve_mip_dynamic(
         avail_prob_arr=None,
     )
 
-    # Determinar status de salida
-    if lp_status == 'Optimal':
-        status_out = "Optimal"
-    else:
-        status_out = "TimeLimit"
+    status_out = "Optimal" if truly_optimal else "TimeLimit"
 
     # Verificación de paridad MIP vs canónica
     mip_obj = pulp.value(prob.objective)
@@ -2115,7 +2128,6 @@ def solve_mip_dynamic(
     for step, (a, b_node) in enumerate(zip(route[:-1], route[1:])):
         b_mip = _day_index(start_day_idx, t_acc, max_day) - start_day_idx
         b_mip = max(0, min(b_mip, B - 1))
-        # bucket elegido por z
         b_chosen = None
         for b in range(B):
             zval = pulp.value(z[step, b])
