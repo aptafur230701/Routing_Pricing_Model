@@ -48,8 +48,10 @@ from problem_data import load_matrices
 from evaluation import (
     run_solver_comparison, save_results, plot_diagnostics, plot_ppo_diagnostics,
 )
+from stats_analysis import append_stats_sheets_to_excel
 from transfer_learning import build_agent_for_training
 from am_agent import AMRoutingAgent
+from convergence_check import check_convergence, print_convergence_report, save_convergence_to_excel
 
 
 def set_seeds(seed: int):
@@ -115,6 +117,7 @@ def _evaluate_and_report(
     distance_arr, diesel_arr, ep_rewards, ep_losses,
     train_time, summary_rows, cwd, label,
     ltr_stack=None, trucks_stack=None, avail_prob_arr=None,
+    n_days_per_node=1,
 ):
     """Comparación de solvers + resumen + guardado de archivos."""
     results_df, timing = run_solver_comparison(
@@ -123,6 +126,7 @@ def _evaluate_and_report(
         NUM_NODES,
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
         avail_prob_arr=avail_prob_arr,
+        n_days_per_node=n_days_per_node,
     )
 
     def avg_valid(col, valid_col):
@@ -237,6 +241,7 @@ def _evaluate_and_report(
     plot_path  = os.path.join(cwd, f"DRL_Training_Diagnostics_{label}.png")
 
     save_results(results_df, summary_rows, excel_path)
+    append_stats_sheets_to_excel(excel_path, results_df)
     if ep_rewards:
         plot_diagnostics(ep_rewards, ep_losses, results_df, NUM_NODES, plot_path)
 
@@ -245,8 +250,9 @@ def _evaluate_and_report(
 
 def main():
     # ── Cambia estos valores según lo que quieras hacer ───────────────────────
-    NUM_NODES  = 20     # opciones: 10 · 20 · 35 · 50 · 75 · 100
-    EVAL_ONLY  = True  # True: carga checkpoint y salta entrenamiento
+    NUM_NODES       = 20     # opciones: 10 · 20 · 35 · 50 · 75 · 100
+    EVAL_ONLY       = False   # True: carga checkpoint y salta entrenamiento
+    N_DAYS_PER_NODE = 3      # días de evaluación por nodo (1 = comportamiento original)
     # ──────────────────────────────────────────────────────────────────────────
 
     cwd          = os.path.dirname(os.path.abspath(__file__))
@@ -274,6 +280,8 @@ def main():
     rate_eval   = rate_stack[TRAIN_DAYS:]
     loads_eval  = loads_stack[TRAIN_DAYS:]
 
+    conv_result = None
+
     if EVAL_ONLY:
         agent_am  = _load_agent(checkpoint_dir, NUM_NODES)
         ep_r, ep_l, t, training_log = [], [], 0.0, []
@@ -290,13 +298,28 @@ def main():
         ppo_plot_path = os.path.join(output_dir, "PPO_Diagnostics_AM.png")
         plot_ppo_diagnostics(training_log, NUM_NODES, ppo_plot_path)
 
+        import pickle
+        tlog_path = os.path.join(output_dir, f"training_log_{NUM_NODES}nodes.pkl")
+        with open(tlog_path, "wb") as _f:
+            pickle.dump(training_log, _f)
+        print(f"training_log guardado en: {tlog_path}")
+
+        if training_log:
+            conv_result = check_convergence(training_log)
+            print_convergence_report(conv_result)
+
     _evaluate_and_report(
         agent_am, NUM_NODES, time_matrix, rate_eval, loads_eval,
         distance_arr, diesel_arr, ep_r, ep_l, t,
         summary_rows, output_dir, label="AM",
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
         avail_prob_arr=avail_prob_arr,
+        n_days_per_node=N_DAYS_PER_NODE,
     )
+
+    if conv_result is not None:
+        excel_path = os.path.join(output_dir, "DRL_Routing_Summary_AM.xlsx")
+        save_convergence_to_excel(conv_result, NUM_NODES, excel_path)
 
     print(f"\nDone! Checkpoint guardado en: checkpoints/am_checkpoint_{NUM_NODES}nodes.pt")
 
