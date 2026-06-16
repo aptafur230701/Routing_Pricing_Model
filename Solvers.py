@@ -1906,7 +1906,7 @@ def _rh_greedy_stoch_from_state(
     current_node, time_elapsed, visited,
     start_node, time_m, rate_stack, loads_stack,
     distance_arr, diesel_arr, max_d, num_n, start_day_idx,
-    avail_prob_arr, seed=None,
+    avail_prob_arr,
 ):
     """Greedy estocástico desde un estado arbitrario (current_node, time_elapsed, visited).
 
@@ -1916,15 +1916,8 @@ def _rh_greedy_stoch_from_state(
 
     Retorna el reward acumulado desde current_node hasta cerrar el ciclo en start_node,
     usando el mismo filtrado Bernoulli y la misma lógica de día dinámico que el resto
-    del sistema.
-
-    NOTA (comportamiento actual, preservado en el refactor): el parámetro `seed`
-    NO tiene efecto. La única fuente de aleatoriedad, draw_lane_availability, se
-    siembra internamente a partir de (start_day_idx, node, arrival_day) y NO del
-    RNG global ni de este `seed`. En consecuencia, las n_simulations trayectorias
-    que solve_mc_rollout_stochastic lanza por candidato son IDÉNTICAS entre sí, y
-    n_simulations no reduce varianza (solo multiplica el costo). Esto se documenta
-    aquí a propósito; "arreglarlo" cambiaría las salidas y debe validarse aparte.
+    del sistema. No recibe seed: draw_lane_availability es determinista dado
+    (start_day_idx, node, arrival_day), así que una sola llamada es suficiente.
     """
     from problem_data import draw_lane_availability
 
@@ -1990,7 +1983,7 @@ def solve_mc_rollout_stochastic(
     start_node, time_m, rate_stack, loads_stack,
     distance_arr, diesel_arr, max_d, num_n, start_day_idx,
     avail_prob_arr,
-    n_simulations=30,
+    n_simulations=1,
     lookahead_base_policy='rh_greedy',
 ):
     """Monte Carlo Rollout estocástico (VFA/policy rollout).
@@ -2006,16 +1999,12 @@ def solve_mc_rollout_stochastic(
         V^rollout(s) ≥ V^base(s)  para todo estado s.
     La garantía es en esperanza; no está garantizada sample-by-sample con n finito.
 
-    **Semillas de simulación**
-    Cada trayectoria k desde candidato j usa seed = (start_day_idx*9973 + j*97 + k)
-    & 0xFFFFFFFF para reproducibilidad. Los sorteos Bernoulli individuales de
-    draw_lane_availability son siempre deterministas dado (start_day_idx, node, arrival_day),
-    por lo que el seed controla solo el estado inicial del RNG de la política base.
-
     Parameters
     ----------
-    n_simulations : int — trayectorias por candidato (default 30). Reduce varianza
-                    de la estimación Q a costa de tiempo O(n_simulations * N).
+    n_simulations : int — mantenido por compatibilidad de firma; el valor por defecto
+                    es 1, ya que múltiples trayectorias por candidato eran idénticas
+                    entre sí bajo draw_lane_availability determinista (nota histórica:
+                    el parámetro seed que se pasaba nunca tuvo efecto sobre el resultado).
     lookahead_base_policy : str — política base usada ('rh_greedy').
 
     Returns
@@ -2073,19 +2062,14 @@ def solve_mc_rollout_stochastic(
             t_after = time_elapsed + float(time_m[current_node, j])
             visited_after = visited | {j}
 
-            future_rewards = []
-            for k in range(n_simulations):
-                seed = int((start_day_idx * _BERNOULLI_SEED_A
-                            + j * _BERNOULLI_SEED_B + k) & 0xFFFFFFFF)
-                future_r = _rh_greedy_stoch_from_state(
-                    j, t_after, visited_after,
-                    start_node, time_m, rate_stack, loads_stack,
-                    distance_arr, diesel_arr, max_d, num_n, start_day_idx,
-                    avail_prob_arr, seed=seed,
-                )
-                future_rewards.append(future_r)
+            future_r = _rh_greedy_stoch_from_state(
+                j, t_after, visited_after,
+                start_node, time_m, rate_stack, loads_stack,
+                distance_arr, diesel_arr, max_d, num_n, start_day_idx,
+                avail_prob_arr,
+            )
 
-            q_value = imm_reward + float(np.mean(future_rewards))
+            q_value = imm_reward + future_r
 
             if q_value > best_q:
                 best_q = q_value

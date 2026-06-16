@@ -4,7 +4,9 @@ test_mc_rollout.py
 Validation tests for solve_mc_rollout_stochastic.
 
 Test 1 — Policy improvement: MC-Rollout reward >= RH-Greedy reward (in expectation).
-Test 2 — Convergence with n_simulations: avg reward is non-decreasing.
+Test 2 — OBSOLETO: Convergence with n_simulations (eliminado). draw_lane_availability es
+         determinista, por lo que todas las trayectorias por candidato eran idénticas;
+         n_simulations ya no tiene efecto real (default=1).
 Test 3 — Canonical evaluation consistency: reported reward matches simulate_route_reward.
 """
 
@@ -82,36 +84,11 @@ def test_policy_improvement(problem_data):
     )
 
 
-# ── Test 2 — Convergence with n_simulations ───────────────────────────────────
-
-def test_convergence_with_simulations(problem_data):
-    """Avg reward over 10 episodes is non-decreasing as n_simulations grows."""
-    tm, rate, loads, dist, diesel, avail = problem_data
-    n_sim_levels = [5, 15, 30]
-    episodes = [(s, d) for s in range(5) for d in range(2)][:10]
-
-    avg_rewards = []
-    for n_sim in n_sim_levels:
-        rewards = []
-        for (start_node, day_idx) in episodes:
-            _, _, mc_r, _, mc_valid = solve_mc_rollout_stochastic(
-                start_node, tm, rate, loads, dist, diesel,
-                MAX_DURATION, NUM_NODES, day_idx, avail,
-                n_simulations=n_sim,
-            )
-            if mc_valid:
-                rewards.append(mc_r)
-        avg = np.mean(rewards) if rewards else -np.inf
-        avg_rewards.append(avg)
-        print(f"  n_sim={n_sim:>3}: avg reward = {avg:.1f}")
-
-    # Allow a small tolerance: avg reward must not drop significantly
-    for i in range(1, len(n_sim_levels)):
-        assert avg_rewards[i] >= avg_rewards[i - 1] - abs(avg_rewards[0]) * 0.10, (
-            f"Avg reward dropped from n_sim={n_sim_levels[i-1]} ({avg_rewards[i-1]:.1f}) "
-            f"to n_sim={n_sim_levels[i]} ({avg_rewards[i]:.1f}) by more than 10%."
-        )
-
+# ── Test 2 — OBSOLETO (eliminado) ─────────────────────────────────────────────
+# test_convergence_with_simulations fue eliminado. draw_lane_availability es
+# determinista dado (start_day_idx, node, arrival_day), así que todas las
+# trayectorias por candidato producían el mismo valor. Promediar n copias
+# idénticas nunca redujo varianza, y n_simulations=1 es ahora el default.
 
 # ── Test 3 — Canonical evaluation consistency ─────────────────────────────────
 
