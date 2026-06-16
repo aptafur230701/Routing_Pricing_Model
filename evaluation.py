@@ -23,6 +23,7 @@ from problem_data import build_day_matrices
 from Solvers import (
     solve_HGA_LNS_metaheuristic,
     solve_label_setting_exact,
+    solve_label_setting_oracle,
     solve_heuristic_rolling_horizon,
     solve_heuristic_rolling_horizon_lookahead,
     solve_heuristic_rolling_horizon_lookahead_stochastic,
@@ -81,6 +82,7 @@ def run_solver_comparison(agent, time_matrix,
     drl_det_times    = []
     hga_lns_times    = []
     ls_exact_times   = []
+    ls_oracle_times  = []
     rh_greedy_times  = []
     rh_lookahead_times = []
     rh_stoch_times   = []
@@ -281,6 +283,33 @@ def run_solver_comparison(agent, time_matrix,
         })
         _p_ls_exact = f"  LS-Exact:       {ls_route} | reward {ls_reward:.1f} [{ls_status}]"
 
+        # ── Label Setting Oracle (cota clarividente, mundo estocástico) ───────────
+        print(f"  [LS-Oracle]...", end=" ", flush=True)
+        t0 = time.time()
+        lso_status, lso_route, lso_reward, lso_duration = solve_label_setting_oracle(
+            s, time_matrix_np, rate_stack, loads_stack,
+            distance_arr, diesel_arr, MAX_DURATION, num_nodes,
+            start_day_idx=day_idx,
+            avail_prob_arr=avail_prob_arr,
+            time_limit_seconds=300,
+        )
+        ls_oracle_times.append(time.time() - t0)
+        print(f"{ls_oracle_times[-1]:.1f}s", flush=True)
+        lso_valid = lso_status in ("Optimal", "Time-Limited") and lso_route is not None
+        row.update({
+            'LS-Oracle Status':   lso_status,
+            'LS-Oracle Route':    lso_route,
+            'LS-Oracle Reward':   lso_reward   if lso_valid else -np.inf,
+            'LS-Oracle Duration': lso_duration if lso_valid else np.inf,
+            'LS-Oracle Valid':    lso_valid,
+        })
+        assert lso_reward >= row.get('DRL Real Reward', -np.inf) - 1e-3, (
+            f"LS-Oracle ({lso_reward:.1f}) no debería ser superado por DRL Real "
+            f"({row.get('DRL Real Reward', float('nan')):.1f}) en start={s} day={day_idx} "
+            f"— revisar alineación de semillas Bernoulli."
+        )
+        _p_ls_oracle = f"  LS-Oracle:      {lso_route} | reward {lso_reward:.1f} [{lso_status}]"
+
         print("  -- Determinísticos --")
         print(_p_drl_det)
         print(_p_rh_greedy)
@@ -292,6 +321,7 @@ def run_solver_comparison(agent, time_matrix,
         print(_p_rh_greedy_real)
         print(_p_rh_lookahead_real)
         print(_p_mc_rollout)
+        print(_p_ls_oracle)
 
         results.append(row)
 
@@ -307,6 +337,7 @@ def run_solver_comparison(agent, time_matrix,
         'rh_stoch_times':             rh_stoch_times,
         'rh_lookahead_stoch_times':   rh_lookahead_stoch_times,
         'mc_rollout_times':           mc_rollout_times,
+        'ls_oracle_times':            ls_oracle_times,
     }
     return df, timing
 

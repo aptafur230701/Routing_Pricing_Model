@@ -1378,6 +1378,168 @@ def _label_setting_core(
     return route, close_r, close_t, timed_out
 
 
+def _label_setting_core_stochastic(
+    start_node, time_matrix_np, rate_stack, loads_stack,
+    distance_arr, diesel_arr, max_d, num_n, start_day_idx,
+    avail_prob_arr,
+    time_limit_seconds=None,
+):
+    """Label Setting DP for the Orienteering Problem with Bernoulli lane filtering.
+
+    Identical to _label_setting_core but filters arc expansions using
+    draw_lane_availability (same Bernoulli draws as beam_search_dynamic and
+    simulate_route_reward). The return-to-depot closure is never filtered.
+    Returns (route, reward, duration, timed_out).
+    """
+    import time as _time
+    from collections import deque
+    from problem_data import build_day_matrices, draw_lane_availability
+
+    max_day = rate_stack.shape[0] - 1
+    deadline = (_time.time() + time_limit_seconds) if time_limit_seconds is not None else None
+
+    _rm_cache = {}
+    def _get_rm(t_elapsed):
+        day_idx = min(start_day_idx + int(t_elapsed // DAYS_PER_PERIOD), max_day)
+        if day_idx not in _rm_cache:
+            _, rm_pen = build_day_matrices(
+                rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
+            )
+            _rm_cache[day_idx] = np.array(rm_pen, dtype=float)
+        return _rm_cache[day_idx]
+
+    start_mask = 1 << start_node
+    all_labels = [[start_node, start_mask, 0.0, 0.0, None]]
+    open_q = deque([0])
+    valid_ids = {0}
+
+    pareto = {(start_node, start_mask): [(0.0, 0.0, 0)]}
+
+    best_close = None
+    timed_out = False
+
+    while open_q:
+        if deadline is not None and _time.time() > deadline:
+            timed_out = True
+            break
+
+        idx = open_q.popleft()
+        if idx not in valid_ids:
+            continue
+
+        cur_node, visited_mask, t_el, rew, _par = all_labels[idx]
+        rm_cur = _get_rm(t_el)
+
+        arrival_day = _day_index(start_day_idx, t_el, max_day)
+        lane_exists = draw_lane_availability(
+            start_day_idx, node=cur_node, arrival_day=arrival_day,
+            avail_prob_arr=avail_prob_arr, num_nodes=num_n,
+        )
+
+        for next_node in range(num_n):
+            if (visited_mask >> next_node) & 1:
+                continue
+            if cur_node != start_node and lane_exists[next_node] != 1:
+                continue
+
+            travel = float(time_matrix_np[cur_node, next_node])
+            new_t  = t_el + travel
+            ret_t  = float(time_matrix_np[next_node, start_node])
+
+            if new_t + ret_t > max_d:
+                continue
+
+            arc_r    = rm_cur[cur_node, next_node]
+            new_r    = rew + arc_r
+            new_mask = visited_mask | (1 << next_node)
+            new_state = (next_node, new_mask)
+
+            front = pareto.get(new_state, [])
+            dominated = False
+            for (et, er, _) in front:
+                if et <= new_t and er >= new_r and (et < new_t or er > new_r):
+                    dominated = True
+                    break
+            if dominated:
+                continue
+
+            surviving = []
+            for (et, er, eid) in front:
+                if new_t <= et and new_r >= er and (new_t < et or new_r > er):
+                    valid_ids.discard(eid)
+                else:
+                    surviving.append((et, er, eid))
+
+            new_idx = len(all_labels)
+            all_labels.append([next_node, new_mask, new_t, new_r, idx])
+            valid_ids.add(new_idx)
+            surviving.append((new_t, new_r, new_idx))
+            pareto[new_state] = surviving
+            open_q.append(new_idx)
+
+            # Return to depot is never filtered — always available.
+            rm_close = _get_rm(new_t)
+            close_r  = new_r + rm_close[next_node, start_node]
+            close_t  = new_t + ret_t
+            if best_close is None or close_r > best_close[0]:
+                best_close = (close_r, close_t, new_idx)
+
+    if best_close is None:
+        return None, -np.inf, np.inf, timed_out
+
+    close_r, close_t, last_idx = best_close
+    path = []
+    cur = last_idx
+    while cur is not None:
+        path.append(all_labels[cur][0])
+        cur = all_labels[cur][4]
+    path.reverse()
+    route = path + [start_node]
+
+    return route, close_r, close_t, timed_out
+
+
+def solve_label_setting_oracle(
+    start_node, time_matrix_np, rate_stack, loads_stack,
+    distance_arr, diesel_arr, max_d, num_n, start_day_idx,
+    avail_prob_arr,
+    time_limit_seconds=None,
+):
+    """Cota superior clarividente (posterior bound) para el mundo estocástico.
+
+    Resuelve el Orienteering Problem de forma exacta vía Label Setting DP,
+    pero con la disponibilidad Bernoulli de cada arco ya revelada de antemano
+    (misma semilla que DRL Real). Esto le da al solver información que ninguna
+    política causal real posee al momento de decidir — por lo tanto este valor
+    es un upper bound informacional, NO el óptimo de política (Bellman-óptimo)
+    del MDP estocástico. Sirve como techo de referencia para el Bloque 2, en el
+    mismo rol que cumplía el antiguo oráculo basado en MIP, ahora vía Label Setting.
+
+    Returns (status, route, total_reward, total_duration).
+    status: "Optimal" | "Time-Limited" | "Infeasible".
+    """
+    route, _label_r, _label_d, timed_out = _label_setting_core_stochastic(
+        start_node, time_matrix_np, rate_stack, loads_stack,
+        distance_arr, diesel_arr, max_d, num_n, start_day_idx,
+        avail_prob_arr=avail_prob_arr,
+        time_limit_seconds=time_limit_seconds,
+    )
+
+    if route is None:
+        return "Infeasible", None, -np.inf, np.inf
+
+    # Re-evaluar canónicamente con la MISMA semilla de disponibilidad,
+    # para paridad bit-exact con DRL Real.
+    total_reward, total_duration = simulate_route_reward(
+        route, start_node, start_day_idx,
+        time_matrix_np, rate_stack, loads_stack, distance_arr, diesel_arr,
+        avail_prob_arr=avail_prob_arr,
+    )
+
+    status = "Time-Limited" if timed_out else "Optimal"
+    return status, route, total_reward, total_duration
+
+
 def solve_label_setting_exact(
     start_node, time_matrix_np, rate_stack, loads_stack,
     distance_arr, diesel_arr, max_d, num_n, start_day_idx,

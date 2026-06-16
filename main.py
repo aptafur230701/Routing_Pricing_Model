@@ -171,6 +171,13 @@ def _evaluate_and_report(
     ).dropna()
     drl_det_avg_gap, _ = _gap_stats(drl_det_gap_series)
 
+    ls_oracle_drl_real_valid = results_df["LS-Oracle Valid"] & results_df["DRL Real Valid"]
+    drl_real_gap_series = results_df.loc[ls_oracle_drl_real_valid].apply(
+        lambda r: (r["LS-Oracle Reward"] - r["DRL Real Reward"]) / abs(r["LS-Oracle Reward"]) * 100
+        if r["LS-Oracle Reward"] != 0 else float("nan"), axis=1
+    ).dropna()
+    drl_real_avg_gap, _ = _gap_stats(drl_real_gap_series)
+
     print(f"\n{'='*60}")
     print(f"  SUMMARY — {NUM_NODES} nodes  [{label}]")
     print(f"{'='*60}")
@@ -181,7 +188,8 @@ def _evaluate_and_report(
     print(f"  RH-Greedy avg reward   : {avg_valid('RH-Greedy Reward', 'RH-Greedy Valid'):>10.1f}")
     print(f"  RH-Lookahead avg reward: {avg_valid('RH-Lookahead Reward', 'RH-Lookahead Valid'):>10.1f}")
     print(f"\n  Bloque 2 — Costo de ejecución estocástica")
-    print(f"  DRL Real avg reward      : {avg_valid('DRL Real Reward', 'DRL Real Valid'):>10.1f}  | gap vs DRL Det: avg ~{real_vs_det_avg:.1f}%")
+    print(f"  LS-Oracle avg reward (cota clarividente): {avg_valid('LS-Oracle Reward', 'LS-Oracle Valid'):>10.1f}")
+    print(f"  DRL Real avg reward      : {avg_valid('DRL Real Reward', 'DRL Real Valid'):>10.1f}  | gap vs DRL Det: avg ~{real_vs_det_avg:.1f}%  | gap vs LS-Oracle: avg ~{drl_real_avg_gap:.1f}%")
     print(f"  RH-Greedy Real avg reward     : {avg_valid('RH-Greedy Real Reward', 'RH-Greedy Real Valid'):>10.1f}")
     print(f"  RH-Lookahead Real avg reward  : {avg_valid('RH-Lookahead Real Reward', 'RH-Lookahead Real Valid'):>10.1f}")
     print(f"  MC-Rollout avg reward        : {avg_valid('MC-Rollout Reward', 'MC-Rollout Valid'):>10.1f}")
@@ -197,6 +205,7 @@ def _evaluate_and_report(
     print(f"  RH-Greedy Real : {np.mean(timing['rh_stoch_times'])*1000:>6.0f} ms")
     print(f"  RH-Lookahead Real: {np.mean(timing['rh_lookahead_stoch_times'])*1000:>6.0f} ms")
     print(f"  MC-Rollout       : {np.mean(timing['mc_rollout_times'])*1000:>6.0f} ms")
+    print(f"  LS-Oracle      : {np.mean(timing['ls_oracle_times'])*1000:>6.0f} ms")
     print(f"  Training time  : {train_time:.1f} s")
     print(f"{'='*60}")
 
@@ -208,6 +217,9 @@ def _evaluate_and_report(
         "DRL Det Avg Reward":              avg_valid("DRL Det Reward", "DRL Det Valid"),
         "DRL Det Gap vs LS-Exact (%)":     drl_det_avg_gap,
         "DRL Real Avg Reward":             avg_valid("DRL Real Reward",  "DRL Real Valid"),
+        "LS-Oracle Avg Reward":            avg_valid("LS-Oracle Reward", "LS-Oracle Valid"),
+        "DRL Real Gap vs LS-Oracle (%)":   drl_real_avg_gap,
+        "LS-Oracle Avg Inference (ms)":    np.mean(timing["ls_oracle_times"]) * 1000,
         "HGA-LNS Avg Reward":              avg_valid("HGA-LNS Reward",   "HGA-LNS Valid"),
         "RH-Greedy Avg Reward":            avg_valid("RH-Greedy Reward",    "RH-Greedy Valid"),
         "RH-Lookahead Avg Reward":         avg_valid("RH-Lookahead Reward", "RH-Lookahead Valid"),
