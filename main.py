@@ -142,25 +142,19 @@ def _evaluate_and_report(
     real_vs_det_avg, _ = _gap_stats(real_vs_det_series)
 
     drl_vs_rh_stoch_valid = results_df["DRL Real Valid"] & results_df["RH-Greedy Real Valid"]
-    drl_vs_rh_stoch_series = results_df.loc[drl_vs_rh_stoch_valid].apply(
-        lambda r: (r["DRL Real Reward"] - r["RH-Greedy Real Reward"]) / abs(r["RH-Greedy Real Reward"]) * 100
-        if r["RH-Greedy Real Reward"] != 0 else float("nan"), axis=1
-    ).dropna()
-    drl_vs_rh_stoch_avg, _ = _gap_stats(drl_vs_rh_stoch_series)
+    _m_drl_rh  = results_df.loc[drl_vs_rh_stoch_valid, "DRL Real Reward"].mean()
+    _m_rh      = results_df.loc[drl_vs_rh_stoch_valid, "RH-Greedy Real Reward"].mean()
+    drl_vs_rh_stoch_avg = (_m_drl_rh - _m_rh) / abs(_m_rh) * 100 if _m_rh != 0 else float("nan")
 
     drl_vs_rhlr_valid = results_df["DRL Real Valid"] & results_df["RH-Lookahead Real Valid"]
-    drl_vs_rhlr_series = results_df.loc[drl_vs_rhlr_valid].apply(
-        lambda r: (r["DRL Real Reward"] - r["RH-Lookahead Real Reward"]) / abs(r["RH-Lookahead Real Reward"]) * 100
-        if r["RH-Lookahead Real Reward"] != 0 else float("nan"), axis=1
-    ).dropna()
-    drl_vs_rhlr_avg, _ = _gap_stats(drl_vs_rhlr_series)
+    _m_drl_rhlr = results_df.loc[drl_vs_rhlr_valid, "DRL Real Reward"].mean()
+    _m_rhlr     = results_df.loc[drl_vs_rhlr_valid, "RH-Lookahead Real Reward"].mean()
+    drl_vs_rhlr_avg = (_m_drl_rhlr - _m_rhlr) / abs(_m_rhlr) * 100 if _m_rhlr != 0 else float("nan")
 
     drl_vs_mc_valid = results_df["DRL Real Valid"] & results_df["MC-Rollout Valid"]
-    drl_vs_mc_series = results_df.loc[drl_vs_mc_valid].apply(
-        lambda r: (r["DRL Real Reward"] - r["MC-Rollout Reward"]) / abs(r["MC-Rollout Reward"]) * 100
-        if r["MC-Rollout Reward"] != 0 else float("nan"), axis=1
-    ).dropna()
-    drl_vs_mc_avg, _ = _gap_stats(drl_vs_mc_series)
+    _m_drl_mc = results_df.loc[drl_vs_mc_valid, "DRL Real Reward"].mean()
+    _m_mc     = results_df.loc[drl_vs_mc_valid, "MC-Rollout Reward"].mean()
+    drl_vs_mc_avg = (_m_drl_mc - _m_mc) / abs(_m_mc) * 100 if _m_mc != 0 else float("nan")
 
     drl_both_ms = np.mean(timing["drl_det_times"] + timing["drl_real_times"]) * 1000
 
@@ -252,7 +246,7 @@ def _evaluate_and_report(
 def main():
     # ── Cambia estos valores según lo que quieras hacer ───────────────────────
     NUM_NODES  = 20     # opciones: 10 · 20 · 35 · 50 · 75 · 100
-    EVAL_ONLY  = False  # True: carga checkpoint y salta entrenamiento
+    EVAL_ONLY  = True  # True: carga checkpoint y salta entrenamiento
     # ──────────────────────────────────────────────────────────────────────────
 
     cwd          = os.path.dirname(os.path.abspath(__file__))

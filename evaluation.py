@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from config import (
     MAX_DURATION,
     REWARD_SCALE_FACTOR,
-    N_EVAL_EPISODES, N_DRL_REAL_SAMPLES, SEED, TRAIN_DAYS,
+    N_EVAL_EPISODES, SEED, TRAIN_DAYS,
 )
 from problem_data import build_day_matrices
 from Solvers import (
@@ -105,18 +105,14 @@ def run_solver_comparison(agent, time_matrix,
         print(f"\nStart node {s}/{num_nodes-1} | eval day {day_idx} (abs day {abs_day_idx})", flush=True)
         row = {'Start Node': s, 'Eval Day Index': day_idx, 'Abs Day Index': abs_day_idx}
 
-        # ── DRL Real — mejor de N_DRL_REAL_SAMPLES rollouts estocásticos ────
+        # ── DRL Real — rollout único bajo revelación post-decisión (mundo fijo por seed) ──
         t0 = time.time()
-        drl_real_route, drl_real_reward, drl_real_duration = None, -np.inf, np.inf
-        for _sample in range(N_DRL_REAL_SAMPLES):
-            _route, _reward, _duration = rollout_drl_env(
-                agent, s, day_idx,
-                time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
-                ltr_stack=ltr_stack, trucks_stack=trucks_stack,
-                avail_prob_arr=avail_prob_arr,
-            )
-            if _route is not None and _reward > drl_real_reward:
-                drl_real_route, drl_real_reward, drl_real_duration = _route, _reward, _duration
+        drl_real_route, drl_real_reward, drl_real_duration = rollout_drl_env(
+            agent, s, day_idx,
+            time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
+            ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+            avail_prob_arr=avail_prob_arr,
+        )
         drl_real_times.append(time.time() - t0)
         drl_real_valid = drl_real_route is not None
         row.update({

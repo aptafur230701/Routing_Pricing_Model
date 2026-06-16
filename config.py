@@ -27,7 +27,6 @@ BIG_M_PENALTY          = -1e9
 
 # ── Evaluation ────────────────────────────────────────────────
 N_EVAL_EPISODES = 50
-N_DRL_REAL_SAMPLES = 5   # número de rollouts estocásticos en inferencia
 
 # ── AM Model architecture ─────────────────────────────────────
 AM_D_H      = 128  # Dimensión de embeddings del Transformer
@@ -65,11 +64,11 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def get_episodes_per_node(num_nodes: int) -> int:
     """Episodes per start-node for the full training run."""
     if num_nodes <= 10:  return 5000
-    if num_nodes <= 20:  return 9000
-    if num_nodes <= 35:  return 6500
-    if num_nodes <= 50:  return 7000
-    if num_nodes <= 75:  return 7500
-    return 8000          # 100 nodos
+    if num_nodes <= 20:  return 14000
+    if num_nodes <= 35:  return 20000
+    if num_nodes <= 50:  return 27000
+    if num_nodes <= 75:  return 30000
+    return 35000          # 100 nodos
 
 
 def get_beam_width(num_nodes: int) -> int:
