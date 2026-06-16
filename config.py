@@ -43,7 +43,9 @@ PPO_LR                    = 1e-5   # Learning rate para el actor
 PPO_GAMMA                 = 0.99   # Factor de descuento para las recompensas futuras
 PPO_GAE_LAMBDA            = 0.95   # Factor de GAE
 PPO_CLIP_EPS              = 0.15   # Clip PPO para limitar cambios de política
-PPO_ENTROPY_COEF          = 0.05   # Coeficiente de entropía para PPO
+PPO_ENTROPY_COEF          = 0.05   # Coeficiente de entropía para PPO (valor de referencia; el entrenamiento usa START/END)
+PPO_ENTROPY_COEF_START    = 0.08   # coeficiente de entropía al inicio del entrenamiento
+PPO_ENTROPY_COEF_END      = 0.02   # coeficiente de entropía al final del entrenamiento (decay lineal)
 PPO_GRAD_CLIP             = 0.5    # Clipping de gradiente para PPO
 
 # ── Train / eval split ───────────────────────────────────────
@@ -74,8 +76,8 @@ def get_beam_width(num_nodes: int) -> int:
     """Beam width for inference, scaled by problem size.
     Modelos pequeños necesitan más exploración en inferencia.
     Modelos grandes tienen políticas más robustas y beam=1 es suficiente."""
-    if num_nodes <= 10: return 5   # modelo pequeño, necesita más exploración
-    if num_nodes <= 20: return 5   # subido de 3 a 5
+    if num_nodes <= 10: return 5    # modelo pequeño, necesita más exploración
+    if num_nodes <= 20: return 10   # validado empíricamente: gap bajó de ~20-29% a ~14-16% vs beam=5
     if num_nodes <= 35: return 3   # balance costo/calidad
     return 1                       # modelo grande, confiar en la política
 

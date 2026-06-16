@@ -33,7 +33,7 @@ from config import (
     AM_D_H, AM_N_HEADS, AM_N_LAYERS, AM_D_FF,
     PPO_N_EPISODES_PER_UPDATE, PPO_N_EPOCHS, PPO_BATCH_SIZE,
     PPO_LR, PPO_GAMMA, PPO_GAE_LAMBDA, PPO_CLIP_EPS,
-    PPO_ENTROPY_COEF, PPO_GRAD_CLIP,
+    PPO_ENTROPY_COEF, PPO_ENTROPY_COEF_START, PPO_ENTROPY_COEF_END, PPO_GRAD_CLIP,
 )
 from routing_env import RoutingEnv
 from problem_data import build_day_matrices
@@ -299,7 +299,6 @@ def run_am_training(
     gamma                 = PPO_GAMMA
     gae_lambda            = PPO_GAE_LAMBDA
     clip_eps              = PPO_CLIP_EPS
-    entropy_coef          = PPO_ENTROPY_COEF
     grad_clip             = PPO_GRAD_CLIP
 
     torch.manual_seed(SEED)
@@ -348,6 +347,9 @@ def run_am_training(
 
     # ── Loop principal ────────────────────────────────────────────────────────
     for update in range(n_updates):
+        progress     = update / max(1, n_updates - 1)
+        entropy_coef = PPO_ENTROPY_COEF_START + (PPO_ENTROPY_COEF_END - PPO_ENTROPY_COEF_START) * progress
+
         buffer = RolloutBuffer()
         update_ep_rewards = []
 
@@ -641,6 +643,7 @@ def run_am_training(
             "kl_divergence":    avg_kl,
             "clip_fraction":    avg_clip_frac,
             "explained_var":    explained_var,
+            "entropy_coef":     entropy_coef,
         })
 
         log_freq = max(1, n_updates // 20)
