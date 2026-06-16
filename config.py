@@ -60,25 +60,6 @@ SEED = 42
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-# ── MIP exact baseline ────────────────────────────────────
-MIP_FLOOR_EPS    = 1e-6       # ε para la desigualdad estricta del floor de bucket
-                               # (desplaza el límite superior del bucket un ε hacia
-                               #  abajo para que T_k en el borde exacto de un múltiplo
-                               #  de DAYS_PER_PERIOD caiga en el bucket correcto)
-
-def get_mip_time_limit(num_nodes: int) -> int:
-    """Tiempo límite HiGHS por instancia, calibrado experimentalmente.
-
-    HiGHS necesita ~120s de presolving para N=20 antes de encontrar la primera
-    solución factible; con 300s llega al ~97% del óptimo en la mayoría de instancias.
-    N=10 converge en <30s con HiGHS, pero se conserva 120s como margen.
-    """
-    if num_nodes <= 10:  return 120   # HiGHS cierra en <30s; 120s es margen amplio
-    if num_nodes <= 20:  return 420   # HiGHS necesita ~365s para probar optimalidad; 420s da margen
-    if num_nodes <= 35:  return 120
-    return 60
-
-
 def get_episodes_per_node(num_nodes: int) -> int:
     """Episodes per start-node for the full training run."""
     if num_nodes <= 10:  return 5000

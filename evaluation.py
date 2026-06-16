@@ -4,7 +4,7 @@ evaluation.py
 Post-training evaluation:
   · generate_optimal_route  — deterministic greedy rollout with trained agent
   · evaluate_stochastic     — N-episode stochastic reward distribution
-  · run_solver_comparison   — DRL vs MIP vs Greedy vs 2-Opt vs GA vs LNS
+  · run_solver_comparison   — DRL vs Greedy vs 2-Opt vs GA vs LNS
   · save_results            — Excel output
   · plot_diagnostics        — 2×2 training diagnostics figure
 """
@@ -20,15 +20,14 @@ from config import (
     N_EVAL_EPISODES, N_DRL_REAL_SAMPLES, SEED, TRAIN_DAYS,
 )
 from problem_data import build_day_matrices
-from config import get_mip_time_limit
 from Solvers import (
     solve_HGA_LNS_metaheuristic,
+    solve_label_setting_exact,
     solve_heuristic_rolling_horizon,
     solve_heuristic_rolling_horizon_lookahead,
     solve_heuristic_rolling_horizon_lookahead_stochastic,
     solve_heuristic_rolling_horizon_stochastic,
     solve_mc_rollout_stochastic,
-    solve_mip_dynamic,
     simulate_route_reward,
 )
 
@@ -81,12 +80,12 @@ def run_solver_comparison(agent, time_matrix,
     drl_real_times   = []
     drl_det_times    = []
     hga_lns_times    = []
+    ls_exact_times   = []
     rh_greedy_times  = []
     rh_lookahead_times = []
     rh_stoch_times   = []
     rh_lookahead_stoch_times = []
     mc_rollout_times = []
-    mip_times        = []
     num_days         = rate_stack.shape[0]
 
     rng         = np.random.default_rng(SEED)
@@ -94,11 +93,8 @@ def run_solver_comparison(agent, time_matrix,
 
     time_matrix_np = np.array(time_matrix, dtype=float)
 
-    mip_time_limit = get_mip_time_limit(num_nodes)
-
     print("\n--- Solver Comparison (eval set) ---")
     print(f"Eval days: {num_days} | absolute range: [{TRAIN_DAYS}, {TRAIN_DAYS + num_days - 1}]")
-    print(f"MIP time limit: {mip_time_limit}s/instancia")
     print(f"Day assignments per node: {day_indices.tolist()}\n")
 
     for s in range(num_nodes):
@@ -264,52 +260,33 @@ def run_solver_comparison(agent, time_matrix,
         })
         _p_hga_lns = f"  HGA-LNS:        {hga_route} | reward {hga_reward:.1f}"
 
-        # ── MIP exacto determinista ───────────────────────────────────────────
-        print(f"  [MIP limit={mip_time_limit}s]...", end=" ", flush=True)
+        # ── Label-Setting Exact ───────────────────────────────────────────────
+        print(f"  [LS-Exact]...", end=" ", flush=True)
         t0 = time.time()
-        mip_result = solve_mip_dynamic(
-            s, time_matrix, rate_stack, loads_stack,
+        ls_status, ls_route, ls_reward, ls_duration = solve_label_setting_exact(
+            s, time_matrix_np, rate_stack, loads_stack,
             distance_arr, diesel_arr, MAX_DURATION, num_nodes,
             start_day_idx=day_idx,
-            time_limit_s=mip_time_limit,
+            time_limit_seconds=300,
         )
-        mip_times.append(time.time() - t0)
-        print(f"{mip_times[-1]:.1f}s", flush=True)
-        mip_status, mip_route, mip_reward, mip_duration = mip_result
-        mip_valid = mip_status == 'Optimal' and mip_route is not None
-
-        # Dominance guard (§5.3): ningún solver determinista puede superar al MIP
-        # si éste reporta Optimal.  Si ocurre, el status se degrada a TimeLimit.
-        if mip_valid:
-            _det_rewards = {
-                'DRL Det':     (drl_det_reward,  drl_det_valid),
-                'RH-Greedy':   (rh_reward,        rh_valid),
-                'RH-Lookahead':(rhl_reward,       rhl_valid),
-                'HGA-LNS':     (hga_reward,       hga_status == 'Optimal'),
-            }
-            for _name, (_r, _v) in _det_rewards.items():
-                if _v and _r > mip_reward + 1e-3:
-                    print(f"  *** DOMINANCE FAIL: {_name} ({_r:.1f}) > MIP ({mip_reward:.1f})"
-                          f" — degradando a TimeLimit ***", flush=True)
-                    mip_status = 'TimeLimit'
-                    mip_valid  = False
-                    break
-
+        ls_exact_times.append(time.time() - t0)
+        print(f"{ls_exact_times[-1]:.1f}s", flush=True)
+        ls_valid = ls_status in ("Optimal", "Time-Limited") and ls_route is not None
         row.update({
-            'MIP Status':   mip_status,
-            'MIP Route':    mip_route,
-            'MIP Reward':   mip_reward   if mip_valid else -np.inf,
-            'MIP Duration': mip_duration if mip_valid else np.inf,
-            'MIP Valid':    mip_valid,
+            'LS-Exact Status':   ls_status,
+            'LS-Exact Route':    ls_route,
+            'LS-Exact Reward':   ls_reward   if ls_valid else -np.inf,
+            'LS-Exact Duration': ls_duration if ls_valid else np.inf,
+            'LS-Exact Valid':    ls_valid,
         })
-        _p_mip = f"  MIP:            {mip_route} | reward {mip_reward:.1f} | status {mip_status}"
+        _p_ls_exact = f"  LS-Exact:       {ls_route} | reward {ls_reward:.1f} [{ls_status}]"
 
         print("  -- Determinísticos --")
         print(_p_drl_det)
         print(_p_rh_greedy)
         print(_p_rh_lookahead)
         print(_p_hga_lns)
-        print(_p_mip)
+        print(_p_ls_exact)
         print("  -- Estocásticos --")
         print(_p_drl_real)
         print(_p_rh_greedy_real)
@@ -324,12 +301,12 @@ def run_solver_comparison(agent, time_matrix,
         'drl_real_times':    drl_real_times,
         'drl_det_times':     drl_det_times,
         'hga_lns_times':     hga_lns_times,
+        'ls_exact_times':    ls_exact_times,
         'rh_greedy_times':            rh_greedy_times,
         'rh_lookahead_times':         rh_lookahead_times,
         'rh_stoch_times':             rh_stoch_times,
         'rh_lookahead_stoch_times':   rh_lookahead_stoch_times,
         'mc_rollout_times':           mc_rollout_times,
-        'mip_times':                  mip_times,
     }
     return df, timing
 
