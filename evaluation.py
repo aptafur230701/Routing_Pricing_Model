@@ -18,6 +18,7 @@ from config import (
     MAX_DURATION,
     REWARD_SCALE_FACTOR,
     N_EVAL_EPISODES, SEED, TRAIN_DAYS,
+    get_beam_width_real,
 )
 from problem_data import build_day_matrices
 from Solvers import (
@@ -47,6 +48,7 @@ def rollout_drl_env(
     ltr_stack:      np.ndarray = None,
     trucks_stack:   np.ndarray = None,
     avail_prob_arr: np.ndarray = None,
+    beam_width:     int        = None,
 ) -> tuple:
     """Beam search con días de mercado dinámicos.
 
@@ -61,6 +63,7 @@ def rollout_drl_env(
             max_duration,
             ltr_stack=ltr_stack, trucks_stack=trucks_stack,
             avail_prob_arr=avail_prob_arr,
+            beam_width=beam_width,
         )
     finally:
         agent.train()
@@ -112,6 +115,7 @@ def run_solver_comparison(agent, time_matrix,
             time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
             ltr_stack=ltr_stack, trucks_stack=trucks_stack,
             avail_prob_arr=avail_prob_arr,
+            beam_width=get_beam_width_real(num_nodes),
         )
         drl_real_times.append(time.time() - t0)
         drl_real_valid = drl_real_route is not None

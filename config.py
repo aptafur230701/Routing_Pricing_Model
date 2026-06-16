@@ -71,7 +71,7 @@ def get_episodes_per_node(num_nodes: int) -> int:
     return 35000          # 100 nodos
 
 
-def get_beam_width(num_nodes: int) -> int:
+def get_beam_width_det(num_nodes: int) -> int:
     """Beam width for inference, scaled by problem size.
     Modelos pequeños necesitan más exploración en inferencia.
     Modelos grandes tienen políticas más robustas y beam=1 es suficiente."""
@@ -79,4 +79,19 @@ def get_beam_width(num_nodes: int) -> int:
     if num_nodes <= 20: return 10   # validado empíricamente: gap bajó de ~20-29% a ~14-16% vs beam=5
     if num_nodes <= 35: return 3   # balance costo/calidad
     return 1                       # modelo grande, confiar en la política
+
+
+def get_beam_width_real(num_nodes: int) -> int:
+    """Beam width para evaluación estocástica (DRL Real).
+    Validado empíricamente sobre nodos con gap >20%: beam=20 satura
+    la mejora (beam=30 no produce cambios adicionales); beam=10-14
+    deja gap residual de exploración sin explotar."""
+    if num_nodes <= 10: return 10
+    if num_nodes <= 20: return 20
+    if num_nodes <= 35: return 8
+    return 5
+
+
+def get_beam_width(num_nodes: int) -> int:
+    return get_beam_width_det(num_nodes)
 
