@@ -109,6 +109,9 @@ class RoutingEnv(gym.Env):
         self._step_count:         int      = None
         self._start_day_idx:      int      = None
         self._current_lane_exists: np.ndarray = None
+        # Cache: day_idx → reward_matrix_penalized (np.ndarray).
+        # Persists across episodes since build_day_matrices is deterministic.
+        self._rm_pen_cache:       dict     = {}
 
     # ─────────────────────────────────────────────────────────────────────────
     # Ciclo de vida del entorno
@@ -193,30 +196,30 @@ class RoutingEnv(gym.Env):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _transition(self, next_node: int) -> float:
-        step_time = (
-            self._time_matrix.iloc[self._current_node, next_node]
-            if hasattr(self._time_matrix, "iloc")
-            else float(self._time_matrix[self._current_node][next_node])
-        )
-        return self._time_elapsed + float(step_time)
+        return self._time_elapsed + float(self._time_matrix[self._current_node, next_node])
 
     def _get_current_day_idx(self) -> int:
         day_offset = int(self._time_elapsed // 14)
         raw = self._start_day_idx + day_offset
         return min(raw, self._rate_stack.shape[0] - 1)
 
+    def _get_rm_pen(self, day_idx: int) -> np.ndarray:
+        if day_idx not in self._rm_pen_cache:
+            _, self._rm_pen_cache[day_idx] = build_day_matrices(
+                self._rate_stack[day_idx],
+                self._loads_stack[day_idx],
+                self._distance_arr,
+                self._diesel_arr,
+            )
+        return self._rm_pen_cache[day_idx]
+
     def _compute_reward(
         self, next_node: int, next_time: float, terminated: bool
     ) -> float:
         current_day_idx = self._get_current_day_idx()
-        _, reward_matrix_penalized_step = build_day_matrices(
-            self._rate_stack[current_day_idx],
-            self._loads_stack[current_day_idx],
-            self._distance_arr,
-            self._diesel_arr,
-        )
-        raw_reward = float(reward_matrix_penalized_step.iloc[self._current_node, next_node])
-        step_reward = float(raw_reward) / REWARD_SCALE_FACTOR
+        rm_pen = self._get_rm_pen(current_day_idx)
+        raw_reward = float(rm_pen[self._current_node, next_node])
+        step_reward = raw_reward / REWARD_SCALE_FACTOR
 
         terminal_reward = 0.0
         if terminated:
@@ -237,13 +240,8 @@ class RoutingEnv(gym.Env):
         # Penalización de callejón temporal — solo en pasos no terminales hacia intermedios
         temporal_warning = 0.0
         if not terminated and next_node != self._start_node:
-            t_return = (
-                float(self._time_matrix.iloc[next_node, self._start_node])
-                if hasattr(self._time_matrix, "iloc")
-                else float(self._time_matrix[next_node][self._start_node])
-            )
-            slack = self.max_duration - (next_time + t_return)
-            if slack < 0:
+            t_return = float(self._time_matrix[next_node, self._start_node])
+            if self.max_duration < next_time + t_return:
                 temporal_warning = 0.05 * TIME_VIOLATION_PENALTY
 
         return step_reward + terminal_reward + temporal_warning
@@ -277,37 +275,25 @@ class RoutingEnv(gym.Env):
         # Self-loop
         mask[self._current_node] = 0
 
-        # Intermedios visitados
-        for v in self._visited_set:
-            if v != self._start_node:
-                mask[v] = 0
+        # Intermedios visitados (vectorizado — start_node siempre se omite)
+        visited_inter = [v for v in self._visited_set if v != self._start_node]
+        if visited_inter:
+            mask[visited_inter] = 0
 
-        # Lookahead temporal: excluir intermedios que agoten el presupuesto
-        has_iloc = hasattr(self._time_matrix, "iloc")
-        for j in range(self.num_nodes):
-            if mask[j] == 1 and j != self._start_node:
-                t_to_j = (
-                    float(self._time_matrix.iloc[self._current_node, j])
-                    if has_iloc
-                    else float(self._time_matrix[self._current_node][j])
-                )
-                t_j_to_start = (
-                    float(self._time_matrix.iloc[j, self._start_node])
-                    if has_iloc
-                    else float(self._time_matrix[j][self._start_node])
-                )
-                if self._time_elapsed + t_to_j + t_j_to_start > self.max_duration:
-                    mask[j] = 0
+        # Lookahead temporal (vectorizado): excluir intermedios que agoten el presupuesto.
+        # start_node queda exento — su retorno es siempre válido en la máscara.
+        non_start   = np.arange(self.num_nodes) != self._start_node
+        t_to_j      = self._time_matrix[self._current_node]      # (N,) current→j
+        t_j_to_dep  = self._time_matrix[:, self._start_node]     # (N,) j→depot
+        over_budget = (self._time_elapsed + t_to_j + t_j_to_dep) > self.max_duration
+        mask[non_start & over_budget] = 0
 
-        # Disponibilidad estocástica: excluir lanes que no existen en este sorteo.
-        # start_node nunca se enmascara por disponibilidad — retorno siempre válido.
-        # Cuando current_node == start_node (primer paso) no se aplica: el camión
-        # ya está ahí, no "llega" — la incertidumbre solo aplica al transitar a nodos nuevos.
+        # Disponibilidad estocástica (vectorizado): excluir lanes que no existen.
+        # start_node nunca se enmascara — retorno siempre válido.
+        # Cuando current_node == start_node (primer paso) no se aplica.
         if self._current_lane_exists is not None and self._current_node != self._start_node:
-            for j in range(self.num_nodes):
-                if mask[j] == 1 and j != self._start_node:
-                    if self._current_lane_exists[j] == 0:
-                        mask[j] = 0
+            lane_absent = (self._current_lane_exists == 0)
+            mask[non_start & lane_absent] = 0
 
         return mask
 

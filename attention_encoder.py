@@ -33,7 +33,6 @@ Compatibilidad:
   · Las matrices (reward, time, distance) aceptan pd.DataFrame o np.ndarray.
 """
 
-import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -53,73 +52,55 @@ def build_node_features(
     current_node:           int,
     start_node:             int,
     visited_set:            set,
-    reward_matrix_penalized,        # pd.DataFrame | np.ndarray (N×N)
-    time_matrix,                    # pd.DataFrame | np.ndarray (N×N)
-    distance_arr:           np.ndarray,  # (N×N)
-    num_nodes:              int,
-    max_duration:           float,
-    trucks_stack:           np.ndarray = None,  # (N, 3) — camiones por nodo×delta para el día actual
-    time_matrix_arr:        np.ndarray = None,  # (N, N) numpy — para cálculo de delta_idx
-    avail_prob_arr:         np.ndarray = None,  # (N, N) — prior Bernoulli por arco
-    reward_global_p95:      float      = 1.0,   # normalizador global para feature [7]
+    reward_matrix_penalized: np.ndarray,  # (N×N)
+    time_matrix:             np.ndarray,  # (N×N)
+    distance_arr:            np.ndarray,  # (N×N)
+    num_nodes:               int,
+    max_duration:            float,
+    trucks_stack:            np.ndarray = None,  # (N, 3) — camiones por nodo×delta
+    time_matrix_arr:         np.ndarray = None,  # unused; kept for API compatibility
+    avail_prob_arr:          np.ndarray = None,  # (N, N) — prior Bernoulli por arco
+    reward_global_p95:       float      = 1.0,
 ) -> np.ndarray:
     """
-    Construye la matriz de features de nodos para el encoder.
+    Construye la matriz de features de nodos para el encoder (vectorizada).
 
     Cada fila j contiene las features del nodo j vistas desde current_node:
-      [reward_norm, time_norm, dist_norm, is_depot, visited, trucks_norm, avail_prior]
+      [reward_norm, time_norm, dist_norm, is_depot, visited, trucks_norm,
+       avail_prior, reward_abs]
 
     La diagonal de reward_matrix_penalized tiene BIG_M_PENALTY (-1e9).
     Se recorta a [-1e4, 1e4] antes de normalizar para evitar desbordamientos.
 
-    Parámetros
-    ----------
-    current_node             : posición actual del camión.
-    start_node               : nodo de inicio del episodio (depot).
-    visited_set              : conjunto de nodos ya visitados.
-    reward_matrix_penalized  : matriz de recompensas con diagonal penalizada.
-    time_matrix              : matriz de tiempos de viaje.
-    distance_arr             : matriz de distancias (np.ndarray).
-    num_nodes                : número de nodos del grafo.
-    max_duration             : límite temporal del episodio (horas).
-    trucks_stack             : camiones por (nodo, delta) para el día actual — shape (N, 3).
-    time_matrix_arr          : time_matrix como numpy array para cálculo de delta_idx.
-    avail_prob_arr           : prior Bernoulli por arco — shape (N, N); feature [6] =
-                               avail_prob_arr[current_node, j], ya en [0,1].
-
-    reward_global_p95 : normalizador global — P95 de valores positivos del rate_stack de
-                        entrenamiento; si se omite usa 1.0 (feature queda en escala cruda).
-
-    Retorna
-    -------
-    np.ndarray de forma (N, N_NODE_FEATURES), dtype float32.
+    Retorna np.ndarray de forma (N, N_NODE_FEATURES), dtype float32.
     """
     feats = np.zeros((num_nodes, N_NODE_FEATURES), dtype=np.float32)
 
-    has_iloc = hasattr(reward_matrix_penalized, "iloc")
-    has_iloc_t = hasattr(time_matrix, "iloc")
+    # Columns 0-2: reward / time / distance, all from current_node row
+    feats[:, 0] = reward_matrix_penalized[current_node]
+    feats[:, 1] = time_matrix[current_node]
+    feats[:, 2] = distance_arr[current_node]
 
-    for j in range(num_nodes):
-        feats[j, 0] = (
-            float(reward_matrix_penalized.iloc[current_node, j])
-            if has_iloc else float(reward_matrix_penalized[current_node][j])
-        )
-        feats[j, 1] = (
-            float(time_matrix.iloc[current_node, j])
-            if has_iloc_t else float(time_matrix[current_node][j])
-        )
-        feats[j, 2] = float(distance_arr[current_node, j])
-        feats[j, 3] = 1.0 if j == start_node else 0.0
-        feats[j, 4] = 1.0 if j in visited_set else 0.0
+    # Column 3: is_depot
+    feats[start_node, 3] = 1.0
 
-        if trucks_stack is not None and time_matrix_arr is not None:
-            travel_hours = float(time_matrix_arr[current_node, j])
-            delta_idx = max(0, min(2, math.ceil(travel_hours / 14.0) - 1))
-            trucks_val = float(trucks_stack[j, delta_idx])
-            feats[j, 5] = min(trucks_val, TRUCKS_CLIP) / TRUCKS_CLIP
+    # Column 4: visited (vectorized — includes start_node since it's always in visited_set)
+    if visited_set:
+        feats[list(visited_set), 4] = 1.0
 
-        if avail_prob_arr is not None:
-            feats[j, 6] = float(avail_prob_arr[current_node, j])
+    # Column 5: trucks_norm (vectorized delta_idx via fancy indexing)
+    if trucks_stack is not None:
+        tm = time_matrix_arr if time_matrix_arr is not None else time_matrix
+        travel_hours = tm[current_node]                                       # (N,)
+        delta_idx = np.clip(
+            np.ceil(travel_hours / 14.0).astype(np.int32) - 1, 0, 2
+        )                                                                      # (N,) int32
+        trucks_vals = trucks_stack[np.arange(num_nodes), delta_idx]           # (N,)
+        feats[:, 5] = np.minimum(trucks_vals, TRUCKS_CLIP) / TRUCKS_CLIP
+
+    # Column 6: avail_prior
+    if avail_prob_arr is not None:
+        feats[:, 6] = avail_prob_arr[current_node]
 
     # Recortar reward para evitar BIG_M_PENALTY (-1e9) en la diagonal
     feats[:, 0] = np.clip(feats[:, 0], -1e4, 1e4)

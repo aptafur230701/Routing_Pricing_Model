@@ -99,12 +99,6 @@ class AMRoutingAgent(nn.Module):
         temporal   : np.ndarray (3,)
         market     : np.ndarray (1,)
         """
-        # Extraer numpy de time_matrix para cálculo de delta_idx en trucks
-        if hasattr(time_matrix, "to_numpy"):
-            time_matrix_arr = time_matrix.to_numpy(dtype=float)
-        else:
-            time_matrix_arr = np.asarray(time_matrix, dtype=float)
-
         trucks_day = trucks_stack[:, day_idx, :]   # (num_nodes, 3)
 
         node_feats = build_node_features(
@@ -112,7 +106,6 @@ class AMRoutingAgent(nn.Module):
             reward_matrix_penalized, time_matrix, distance_arr,
             self.num_nodes, max_duration,
             trucks_stack=trucks_day,
-            time_matrix_arr=time_matrix_arr,
             avail_prob_arr=avail_prob_arr,
             reward_global_p95=reward_global_p95,
         )
@@ -185,9 +178,6 @@ class AMRoutingAgent(nn.Module):
         total_reward : float
         time_elapsed : float
         """
-        has_iloc   = hasattr(reward_matrix_penalized, "iloc")
-        has_iloc_t = hasattr(time_matrix, "iloc")
-
         beams = [{
             "current_node":  start_node,
             "time_elapsed":  0.0,
@@ -224,20 +214,13 @@ class AMRoutingAgent(nn.Module):
                     current_node, start_node, visited_set, self.num_nodes
                 ).to(self.device)
 
-                # Lookahead temporal: excluir intermedios que impidan el retorno
-                mask_np = mask_int.cpu().numpy()[0]
-                for j in range(self.num_nodes):
-                    if mask_np[j] == 1 and j != start_node:
-                        t_to_j = (
-                            float(time_matrix.iloc[current_node, j])
-                            if has_iloc_t else float(time_matrix[current_node][j])
-                        )
-                        t_j_start = (
-                            float(time_matrix.iloc[j, start_node])
-                            if has_iloc_t else float(time_matrix[j][start_node])
-                        )
-                        if time_elapsed + t_to_j + t_j_start > max_duration + 1e-6:
-                            mask_np[j] = 0
+                # Lookahead temporal (vectorizado): excluir intermedios que impidan el retorno
+                mask_np    = mask_int.cpu().numpy()[0]
+                non_start  = np.arange(self.num_nodes) != start_node
+                t_to_j     = time_matrix[current_node]              # (N,)
+                t_j_start  = time_matrix[:, start_node]             # (N,)
+                over_budget = (time_elapsed + t_to_j + t_j_start) > max_duration + 1e-6
+                mask_np[non_start & over_budget] = 0
 
                 valid_non_start = [j for j in range(self.num_nodes)
                                    if mask_np[j] == 1 and j != start_node]
@@ -263,14 +246,8 @@ class AMRoutingAgent(nn.Module):
 
                 # Crear beams hijos para cada candidato
                 for next_node in candidate_nodes:
-                    step_time = (
-                        float(time_matrix.iloc[current_node, next_node])
-                        if has_iloc_t else float(time_matrix[current_node][next_node])
-                    )
-                    step_reward = (
-                        float(reward_matrix_penalized.iloc[current_node, next_node])
-                        if has_iloc else float(reward_matrix_penalized[current_node][next_node])
-                    )
+                    step_time   = float(time_matrix[current_node, next_node])
+                    step_reward = float(reward_matrix_penalized[current_node, next_node])
 
                     if time_elapsed + step_time > max_duration + 1e-6 and next_node != start_node:
                         continue
@@ -303,15 +280,9 @@ class AMRoutingAgent(nn.Module):
         # Intento de retorno forzado para beams que no cerraron el ciclo
         for beam in beams:
             if not beam["returned_home"] and beam["current_node"] != start_node:
-                cn = beam["current_node"]
-                t_ret = (
-                    float(time_matrix.iloc[cn, start_node])
-                    if has_iloc_t else float(time_matrix[cn][start_node])
-                )
-                r_ret = (
-                    float(reward_matrix_penalized.iloc[cn, start_node])
-                    if has_iloc else float(reward_matrix_penalized[cn][start_node])
-                )
+                cn    = beam["current_node"]
+                t_ret = float(time_matrix[cn, start_node])
+                r_ret = float(reward_matrix_penalized[cn, start_node])
                 if beam["time_elapsed"] + t_ret <= max_duration + 1e-6:
                     beam["time_elapsed"] += t_ret
                     beam["total_reward"] += r_ret
@@ -420,13 +391,8 @@ class AMRoutingAgent(nn.Module):
         from config import get_beam_width as _get_beam_width
         from problem_data import build_day_matrices
 
-        def _arc_reward(rm, i, j):
-            return float(rm.iloc[i, j])
-
         if beam_width is None:
             beam_width = _get_beam_width(self.num_nodes)
-
-        has_iloc_t = hasattr(time_matrix, "iloc")
         max_day    = rate_stack.shape[0] - 1
         day_cache  = {}  # day_idx → rm_penalized; evita reconstruir el mismo día
 
@@ -488,27 +454,19 @@ class AMRoutingAgent(nn.Module):
                     current_node, start_node, visited_set, self.num_nodes
                 ).to(self.device)
 
-                mask_np = mask_int.cpu().numpy()[0]
-                for j in range(self.num_nodes):
-                    if mask_np[j] == 1 and j != start_node:
-                        t_to_j = (
-                            float(time_matrix.iloc[current_node, j])
-                            if has_iloc_t else float(time_matrix[current_node][j])
-                        )
-                        t_j_start = (
-                            float(time_matrix.iloc[j, start_node])
-                            if has_iloc_t else float(time_matrix[j][start_node])
-                        )
-                        if time_elapsed + t_to_j + t_j_start > max_duration + 1e-6:
-                            mask_np[j] = 0
+                # Lookahead temporal (vectorizado)
+                mask_np    = mask_int.cpu().numpy()[0]
+                non_start  = np.arange(self.num_nodes) != start_node
+                t_to_j     = time_matrix[current_node]
+                t_j_start  = time_matrix[:, start_node]
+                over_budget = (time_elapsed + t_to_j + t_j_start) > max_duration + 1e-6
+                mask_np[non_start & over_budget] = 0
 
-                # Disponibilidad estocástica — mismo esquema de semillas que RoutingEnv.
+                # Disponibilidad estocástica (vectorizado) — mismo esquema que RoutingEnv.
                 # No se aplica cuando current_node == start_node (primer paso del beam).
                 if beam["lane_exists"] is not None and current_node != start_node:
-                    for j in range(self.num_nodes):
-                        if mask_np[j] == 1 and j != start_node:
-                            if beam["lane_exists"][j] == 0:
-                                mask_np[j] = 0
+                    lane_absent = (beam["lane_exists"] == 0)
+                    mask_np[non_start & lane_absent] = 0
 
                 valid_non_start = [j for j in range(self.num_nodes)
                                    if mask_np[j] == 1 and j != start_node]
@@ -529,14 +487,11 @@ class AMRoutingAgent(nn.Module):
                     candidate_nodes = valid_nodes[:beam_width]
 
                 for next_node in candidate_nodes:
-                    step_time = (
-                        float(time_matrix.iloc[current_node, next_node])
-                        if has_iloc_t else float(time_matrix[current_node][next_node])
-                    )
+                    step_time = float(time_matrix[current_node, next_node])
                     if time_elapsed + step_time > max_duration + 1e-6 and next_node != start_node:
                         continue
 
-                    step_reward      = _arc_reward(rm_day, current_node, next_node)
+                    step_reward = float(rm_day[current_node, next_node])
                     new_time_elapsed = time_elapsed + step_time
 
                     # Sorteo de disponibilidad para next_node al llegar.
@@ -583,11 +538,8 @@ class AMRoutingAgent(nn.Module):
                 cn         = beam["current_node"]
                 day_offset = int(beam["time_elapsed"] // 14)
                 rm_day     = get_rm(min(start_day_idx + day_offset, max_day))
-                t_ret = (
-                    float(time_matrix.iloc[cn, start_node])
-                    if has_iloc_t else float(time_matrix[cn][start_node])
-                )
-                r_ret = _arc_reward(rm_day, cn, start_node)
+                t_ret = float(time_matrix[cn, start_node])
+                r_ret = float(rm_day[cn, start_node])
                 if beam["time_elapsed"] + t_ret <= max_duration + 1e-6:
                     beam["time_elapsed"] += t_ret
                     beam["total_reward"] += r_ret
@@ -724,10 +676,16 @@ class AMRoutingAgent(nn.Module):
             avail_prob_arr=avail_prob_arr,
             reward_global_p95=reward_global_p95,
         )
-        value  = critic(h_t).item()
-        mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
+        critic_val = critic(h_t)                                            # (1,1) on device
+        mask_t     = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
         action_t, log_prob, entropy = self.decoder.act(h_t, embeddings, mask_t)
-        return int(action_t.item()), log_prob.squeeze(0), entropy.squeeze(0), value, node_feats, temporal, market
+        # action is int64 — extract with .item() to avoid float32 cast and
+        # the NumPy ≥1.25 deprecation of int(ndim>0 array).
+        # log_prob and critic_val are both float32 scalars: batch them into one
+        # CPU transfer (2 syncs total instead of the original 3).
+        action = int(action_t.item())
+        sync   = torch.stack([log_prob.view(1), critic_val.view(1)]).cpu().numpy()
+        return action, float(sync[0]), entropy.squeeze(0), float(sync[1]), node_feats, temporal, market
 
     def estimate_value(
         self,

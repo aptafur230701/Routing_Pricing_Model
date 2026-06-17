@@ -29,11 +29,8 @@ def _make_rm_cache(rate_stack, loads_stack, distance_arr, diesel_arr,
     """Devuelve un closure get_rm(t) que construye y cachea (por llamada) la
     matriz de reward del día correspondiente a `t`.
 
-    as_numpy=True  → np.ndarray (acceso rm[i, j]); usado por la familia lookahead,
-                     stochastic y el rollout.
-    as_numpy=False → pd.DataFrame (acceso rm[i][j] / rm.iloc[i, j]); usado por
-                     solve_heuristic_rolling_horizon(_stochastic) y
-                     simulate_route_reward, que dependen de ese tipo/indexación.
+    as_numpy=True  → np.ndarray float64 (copia explícita); usado por lookahead y rollout.
+    as_numpy=False → np.ndarray directo de build_day_matrices (sin copia).
 
     Centraliza el patrón `_get_rm` que estaba duplicado ~6 veces. NO cambia qué
     matriz ve cada llamador ni cómo la indexa: solo unifica construcción y caché.
@@ -1240,7 +1237,7 @@ def simulate_route_reward(
         j       = route[step + 1]
         day_idx = _day_index(start_day_idx, time_elapsed, max_day)
         rm      = _get_rm(time_elapsed)
-        arc_r   = float(rm.iloc[i, j])
+        arc_r   = float(rm[i, j])
 
         # Mirror beam_search_dynamic: skip Bernoulli when departing from or
         # arriving at start_node (those arcs are always available).

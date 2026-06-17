@@ -271,7 +271,7 @@ def run_am_training(
 
     Parámetros
     ----------
-    time_matrix    : pd.DataFrame — tiempos entre nodos.
+    time_matrix    : np.ndarray — tiempos entre nodos.
     rate_stack     : np.ndarray [num_days, N, N]
     loads_stack    : np.ndarray [num_days, N, N]
     distance_arr   : np.ndarray [N, N]
@@ -441,7 +441,7 @@ def run_am_training(
                         mask=mask,
                         action=action,
                         reward=float(reward),   # reward limpio, sin penalty artificial
-                        log_prob=log_prob.item(),
+                        log_prob=log_prob,      # already float from act_with_value
                         value=value,
                         done=done,
                         market_feats=mf,

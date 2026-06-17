@@ -43,22 +43,18 @@ def build_day_matrices(
 
     Returns
     -------
-    reward_matrix            : pd.DataFrame (num_nodes × num_nodes)
-    reward_matrix_penalized  : pd.DataFrame (diagonal = BIG_M_PENALTY)
+    reward_matrix            : np.ndarray (num_nodes × num_nodes)
+    reward_matrix_penalized  : np.ndarray (diagonal = BIG_M_PENALTY)
     """
     revenue = (rate_day * distance_arr).copy()
     revenue[loads_day <= 1] = 0
-    #cost       = distance_arr * (diesel_arr / MPG) + 158 + 1.2 * distance_arr
     cost       = distance_arr * (diesel_arr / MPG) + distance_arr * MARGINAL_COST_SIN_DIESEL
     reward_arr = np.round(revenue - cost, 0)
 
-    reward_matrix = pd.DataFrame(reward_arr)
-
     penalized_arr = reward_arr.copy()
     np.fill_diagonal(penalized_arr, BIG_M_PENALTY)
-    reward_matrix_penalized = pd.DataFrame(penalized_arr)
 
-    return reward_matrix, reward_matrix_penalized
+    return reward_arr, penalized_arr
 
 
 def draw_lane_availability(
@@ -108,7 +104,7 @@ def load_matrices(num_nodes: int) -> tuple:
 
     Returns
     -------
-    time_matrix    : pd.DataFrame  (num_nodes × num_nodes)
+    time_matrix    : np.ndarray    (num_nodes × num_nodes) float64
     rate_stack     : np.ndarray    (num_days × num_nodes × num_nodes)
     loads_stack    : np.ndarray    (num_days × num_nodes × num_nodes)
     distance_arr   : np.ndarray    (num_nodes × num_nodes)
@@ -141,9 +137,7 @@ def load_matrices(num_nodes: int) -> tuple:
     trucks_stack = trucks_raw[:num_nodes, :].astype(np.float32).reshape(num_nodes, 120, 5)[:, :, 0:3]
 
     # ── Slice fixed matrices to num_nodes ─────────────────────────
-    time_matrix  = (time_matrix_raw.iloc[:num_nodes, :num_nodes]).copy()
-    time_matrix.index   = range(num_nodes)   # reset a enteros 0-based
-    time_matrix.columns = range(num_nodes)
+    time_matrix  = time_matrix_raw.iloc[:num_nodes, :num_nodes].to_numpy(dtype=float)
     distance_arr = distance_raw.iloc[:num_nodes, :num_nodes].to_numpy(dtype=float)
     diesel_arr   = diesel_raw.iloc[:num_nodes, :num_nodes].to_numpy(dtype=float)
 
