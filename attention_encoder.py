@@ -354,6 +354,124 @@ def build_market_features(
 # Utilidad: features temporales desde el estado del entorno
 # ─────────────────────────────────────────────────────────────────────────────
 
+def build_node_features_batch(
+    current_node:      np.ndarray,   # (B,) int64
+    start_node:        np.ndarray,   # (B,) int64
+    visited_mask:      np.ndarray,   # (B, N) bool
+    rm_pen_stack:      np.ndarray,   # (num_train_days, N, N)
+    time_matrix_arr:   np.ndarray,   # (N, N)
+    distance_arr:      np.ndarray,   # (N, N)
+    day_idx:           np.ndarray,   # (B,) int64
+    num_nodes:         int,
+    max_duration:      float,
+    trucks_stack_raw:  np.ndarray = None,   # (N, num_days_ltr, 3)
+    avail_prob_arr:    np.ndarray = None,   # (N, N)
+    reward_global_p95: float      = 1.0,
+) -> np.ndarray:                            # (B, N, N_NODE_FEATURES=8) float32
+    """
+    Batched version of build_node_features.
+
+    Computes the (N, 8) feature matrix for each of B episodes simultaneously
+    using numpy fancy indexing — no Python loops over N or B.
+
+    trucks_stack_raw shape is (N, num_days_ltr, 3): the full trucks stack.
+    day_idx is used to select the appropriate day slice per episode.
+    """
+    B = len(current_node)
+    N = num_nodes
+    feats = np.zeros((B, N, N_NODE_FEATURES), dtype=np.float32)
+
+    # ── f0: reward from rm_pen_stack ──────────────────────────────────────────
+    # rm_pen_stack[day_idx[b], current_node[b], j] for all j → (B, N)
+    feats[:, :, 0] = rm_pen_stack[day_idx, current_node, :]   # fancy: (B, N)
+
+    # ── f1: travel time from current node to each j ───────────────────────────
+    feats[:, :, 1] = time_matrix_arr[current_node, :]          # (B, N)
+
+    # ── f2: distance from current node to each j ─────────────────────────────
+    feats[:, :, 2] = distance_arr[current_node, :]             # (B, N)
+
+    # ── f3: is_depot — 1.0 if j == start_node[b] ─────────────────────────────
+    feats[:, :, 3] = (np.arange(N)[None, :] == start_node[:, None]).astype(np.float32)
+
+    # ── f4: visited — 1.0 if j in visited_mask[b] ────────────────────────────
+    feats[:, :, 4] = visited_mask.astype(np.float32)
+
+    # ── f5: trucks availability ───────────────────────────────────────────────
+    if trucks_stack_raw is not None:
+        travel_hours = time_matrix_arr[current_node, :]                 # (B, N)
+        delta_idx = np.clip(
+            np.ceil(travel_hours / 14.0).astype(np.int32) - 1, 0, 2
+        )                                                                # (B, N)
+        # trucks_stack_raw: (N, num_days_ltr, 3)
+        max_ltr_day = trucks_stack_raw.shape[1] - 1
+        day_idx_t = np.minimum(day_idx, max_ltr_day)
+        trucks_val = trucks_stack_raw[
+            np.arange(N)[None, :],    # (1, N) → (B, N)
+            day_idx_t[:, None],       # (B, 1) → (B, N)
+            delta_idx,                # (B, N)
+        ]                                                                # (B, N)
+        feats[:, :, 5] = np.minimum(trucks_val, TRUCKS_CLIP) / TRUCKS_CLIP
+
+    # ── f6: lane availability prior ───────────────────────────────────────────
+    if avail_prob_arr is not None:
+        feats[:, :, 6] = avail_prob_arr[current_node, :]       # (B, N)
+
+    # ── Clip reward before normalization (avoids BIG_M_PENALTY overflow) ─────
+    feats[:, :, 0] = np.clip(feats[:, :, 0], -1e4, 1e4)
+    raw_rewards = feats[:, :, 0].copy()   # (B, N) — before normalization for f7
+
+    # ── Row-wise min-max normalization for f0 (reward) and f2 (distance) ─────
+    for col in (0, 2):
+        col_min = feats[:, :, col].min(axis=1, keepdims=True)   # (B, 1)
+        col_max = feats[:, :, col].max(axis=1, keepdims=True)   # (B, 1)
+        rng = col_max - col_min
+        safe = (rng > 0).squeeze(axis=1)                         # (B,)
+        feats[safe, :, col] = (
+            (feats[safe, :, col] - col_min[safe]) / rng[safe]
+        )
+        feats[~safe, :, col] = 0.0
+
+    # ── Absolute normalization for f1 (time) ─────────────────────────────────
+    feats[:, :, 1] = np.clip(feats[:, :, 1] / max(max_duration, 1e-6), 0.0, 1.0)
+
+    # ── f7: absolute reward normalized by global P95 ──────────────────────────
+    _denom = max(reward_global_p95, 1e-6)
+    feat7 = np.clip(raw_rewards / _denom, 0.0, 1.0)
+    feat7[raw_rewards < 0] = 0.0
+    feats[:, :, 7] = feat7
+
+    return feats
+
+
+def build_temporal_features_batch(
+    time_elapsed: np.ndarray,   # (B,) float32
+    step_count:   np.ndarray,   # (B,) int64
+    max_duration: float,
+    num_nodes:    int,
+) -> np.ndarray:                # (B, 3) float32
+    """Batched version of build_temporal_features."""
+    denom = max(max_duration, 1e-6)
+    out = np.empty((len(time_elapsed), 3), dtype=np.float32)
+    out[:, 0] = np.minimum(time_elapsed, max_duration) / denom
+    out[:, 1] = np.maximum(0.0, max_duration - time_elapsed) / denom
+    out[:, 2] = step_count / max(num_nodes, 1)
+    return out
+
+
+def build_market_features_batch(
+    current_node: np.ndarray,   # (B,) int64
+    day_idx:      np.ndarray,   # (B,) int64
+    ltr_stack:    np.ndarray,   # (N, num_ltr_days)
+) -> np.ndarray:                # (B, 1) float32
+    """Batched version of build_market_features."""
+    max_ltr_day = ltr_stack.shape[1] - 1
+    day_idx_safe = np.minimum(day_idx, max_ltr_day)
+    ltr_raw = ltr_stack[current_node, day_idx_safe].astype(np.float32)   # (B,)
+    ltr_norm = np.clip(ltr_raw, 0.0, LTR_CLIP) / LTR_CLIP
+    return ltr_norm[:, None]   # (B, 1)
+
+
 def build_temporal_features(
     time_elapsed: float,
     step_count:   int,

@@ -88,6 +88,23 @@ def draw_lane_availability(
     return (rng.random(num_nodes) < avail_prob_arr[node]).astype(np.int8)
 
 
+def build_rm_pen_stack(
+    rate_stack:   np.ndarray,   # (num_days, N, N)
+    loads_stack:  np.ndarray,   # (num_days, N, N)
+    distance_arr: np.ndarray,   # (N, N)
+    diesel_arr:   np.ndarray,   # (N, N)
+) -> np.ndarray:                # (num_days, N, N) float32
+    """Precompute the full stack of penalized reward matrices for all training days.
+
+    Returns shape (num_days, N, N) float32 — one penalized reward matrix per day.
+    Diagonal of each slice is BIG_M_PENALTY. Used by VectorRoutingEnv.
+    """
+    return np.stack([
+        build_day_matrices(rate_stack[d], loads_stack[d], distance_arr, diesel_arr)[1]
+        for d in range(len(rate_stack))
+    ]).astype(np.float32)
+
+
 def load_matrices(num_nodes: int) -> tuple:
     """Load data files and return multi-day stacks for rate/loads.
 

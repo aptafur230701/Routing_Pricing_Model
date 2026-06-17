@@ -19,7 +19,6 @@ Interfaz análoga a run_training() de training.py:
 · Usa RoutingEnv como entorno estándar (Siguiendo practicas de API Gymnasium).
 """
 
-import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -35,8 +34,13 @@ from config import (
     PPO_LR, PPO_GAMMA, PPO_GAE_LAMBDA, PPO_CLIP_EPS,
     PPO_ENTROPY_COEF, PPO_ENTROPY_COEF_START, PPO_ENTROPY_COEF_END, PPO_GRAD_CLIP,
 )
-from routing_env import RoutingEnv
-from problem_data import build_day_matrices
+from routing_env import RoutingEnv, VectorRoutingEnv
+from problem_data import build_day_matrices, build_rm_pen_stack
+from attention_encoder import (
+    build_node_features_batch,
+    build_temporal_features_batch,
+    build_market_features_batch,
+)
 from am_agent import AMRoutingAgent
 from critic_head import CriticHead
 from debug_utils import check_tensor
@@ -323,14 +327,26 @@ def run_am_training(
     actor_optimizer  = torch.optim.Adam(agent.parameters(),  lr=lr)
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=lr * 10)
 
-    # ── Entorno ───────────────────────────────────────────────────────────────
-    env = RoutingEnv(
+    # ── Precomputar stack de reward matrices (una sola vez, fuera del loop) ──────
+    time_matrix_arr = (
+        time_matrix.to_numpy(dtype=float)
+        if hasattr(time_matrix, "to_numpy")
+        else np.asarray(time_matrix, dtype=float)
+    )
+    rm_pen_stack = build_rm_pen_stack(
+        rate_stack[:num_train_days], loads_stack[:num_train_days],
+        distance_arr, diesel_arr,
+    )   # (num_train_days, N, N) float32
+
+    # ── Entorno vectorizado (una sola instancia, reutilizada en cada update) ──
+    vec_env = VectorRoutingEnv(
         time_matrix=time_matrix,
         rate_stack=rate_stack,
         loads_stack=loads_stack,
         distance_arr=distance_arr,
         diesel_arr=diesel_arr,
         avail_prob_arr=avail_prob_arr,
+        rm_pen_stack=rm_pen_stack,
         num_nodes=num_nodes,
         max_duration=MAX_DURATION,
     )
@@ -343,7 +359,6 @@ def run_am_training(
     episode_rewards = []
     episode_losses  = []
     training_log    = []
-    node_ep_counts  = {n: 0 for n in range(num_nodes)}
 
     # ── Loop principal ────────────────────────────────────────────────────────
     for update in range(n_updates):
@@ -353,109 +368,159 @@ def run_am_training(
         buffer = RolloutBuffer()
         update_ep_rewards = []
 
-        # ── Fase 1: Recolección de rollouts ───────────────────────────────────
+        # ── Fase 1: Recolección vectorizada (B episodios en paralelo) ─────────
         agent.eval()
         critic.eval()
 
-        for _ in range(n_episodes_per_update):
-            # Selección balanceada del nodo de inicio
-            min_count = min(node_ep_counts.values())
-            candidates = [n for n, c in node_ep_counts.items() if c == min_count]
-            start_node = random.choice(candidates)
-            node_ep_counts[start_node] += 1
+        B = n_episodes_per_update   # 360
 
-            # Samplear día de inicio del episodio (sólo días de train)
-            start_day_idx = np.random.randint(0, num_train_days)
-            obs, info = env.reset(options={"start_node": start_node, "start_day_idx": start_day_idx})
+        # Balanced start-node sampling: each node appears exactly floor(B/N) times,
+        # with remainder filled by random choice — same balance as the sequential
+        # greedy node_ep_counts approach but per-update instead of globally.
+        episodes_per_node = B // num_nodes
+        remainder         = B % num_nodes
+        start_nodes_arr   = np.repeat(np.arange(num_nodes), episodes_per_node)
+        if remainder:
+            extra = np.random.choice(num_nodes, size=remainder, replace=False)
+            start_nodes_arr = np.concatenate([start_nodes_arr, extra])
+        start_nodes_arr = np.random.permutation(start_nodes_arr).astype(np.int64)
+        start_day_idxs  = np.random.randint(0, num_train_days, size=B).astype(np.int64)
 
-            ep_start_idx = len(buffer)
-            ep_reward    = 0.0
-            last_value   = 0.0
-            ep_truncated = False
+        # Per-episode accumulators — each is a list of transition dicts.
+        # Accumulated separately to keep episodes contiguous in the flat buffer,
+        # since episodes of different lengths interleave in the step loop.
+        ep_bufs        = [[] for _ in range(B)]
+        last_values    = np.zeros(B, dtype=np.float32)
+        truncated_flags = np.zeros(B, dtype=bool)
 
-            _rm_cache = {}
-            def get_rm_pen(day_idx):
-                if day_idx not in _rm_cache:
-                    _, rm = build_day_matrices(
-                        rate_stack[day_idx], loads_stack[day_idx], distance_arr, diesel_arr
-                    )
-                    _rm_cache[day_idx] = rm
-                return _rm_cache[day_idx]
+        masks  = vec_env.reset(start_nodes_arr, start_day_idxs)   # (B, N)
+        active = np.ones(B, dtype=bool)
+
+        with torch.no_grad():
+            for step_i in range(num_nodes):   # defensive ceiling
+                if not active.any():
+                    break
+
+                cur_nodes = vec_env.current_node     # (B,) int64
+                time_el   = vec_env.time_elapsed     # (B,) float32
+                step_cnt  = vec_env.step_count       # (B,) int64
+                day_idx   = vec_env.current_day_idx  # (B,) int64
+
+                # Feature construction — no Python loops over N or B
+                node_feats = build_node_features_batch(
+                    cur_nodes, start_nodes_arr, vec_env.visited_mask,
+                    rm_pen_stack, time_matrix_arr, distance_arr,
+                    day_idx, num_nodes, MAX_DURATION,
+                    trucks_stack_raw=trucks_stack,
+                    avail_prob_arr=avail_prob_arr,
+                    reward_global_p95=reward_global_p95,
+                )   # (B, N, 8)
+                temporal = build_temporal_features_batch(time_el, step_cnt, MAX_DURATION, num_nodes)   # (B, 3)
+                market   = build_market_features_batch(cur_nodes, day_idx, ltr_stack) if ltr_stack is not None \
+                           else np.zeros((B, 1), dtype=np.float32)                                     # (B, 1)
+
+                # Single forward pass over the full batch
+                node_feats_t = torch.from_numpy(node_feats).to(DEVICE)
+                temporal_t   = torch.from_numpy(temporal).to(DEVICE)
+                market_t     = torch.from_numpy(market).to(DEVICE)
+                cur_nodes_t  = torch.tensor(cur_nodes, dtype=torch.long, device=DEVICE)
+                mask_t       = torch.from_numpy(masks).to(DEVICE)
+
+                actions_t, log_probs_t, _, values_t = _forward(
+                    agent, critic, node_feats_t, temporal_t, cur_nodes_t, mask_t,
+                    market_feats_t=market_t,
+                )
+                actions   = actions_t.cpu().numpy()    # (B,) int64
+                log_probs = log_probs_t.cpu().numpy()  # (B,)
+                values    = values_t.cpu().numpy()     # (B,)
+
+                # Vectorized environment step
+                rewards, terminated, next_masks = vec_env.step(actions)
+
+                # Write transitions — only for rows active BEFORE this step
+                for b in np.where(active)[0]:
+                    ep_bufs[b].append({
+                        "node_feats":   node_feats[b],        # (N, 8)
+                        "temporal":     temporal[b],           # (3,)
+                        "market_feats": market[b],             # (1,)
+                        "current_node": int(cur_nodes[b]),
+                        "mask":         masks[b],              # (N,) int8
+                        "action":       int(actions[b]),
+                        "reward":       float(rewards[b]),
+                        "log_prob":     float(log_probs[b]),
+                        "value":        float(values[b]),
+                        "done":         bool(terminated[b]),
+                    })
+                    if terminated[b]:
+                        last_values[b] = 0.0   # MDP termination: no bootstrap
+
+                active = active & ~terminated
+                masks  = next_masks
+
+        # Episodes still active after the step loop were truncated by the step ceiling
+        if active.any():
+            trunc_idx = np.where(active)[0]
+
+            # Bootstrap value from a fresh critic forward pass over post-step state
+            # (NOT recycling values[] from the last loop iteration — that was pre-step)
+            cur_nodes_post = vec_env.current_node[trunc_idx]
+            time_el_post   = vec_env.time_elapsed[trunc_idx]
+            step_cnt_post  = vec_env.step_count[trunc_idx]
+            day_idx_post   = vec_env.current_day_idx[trunc_idx]
+
+            nf_trunc = build_node_features_batch(
+                cur_nodes_post, start_nodes_arr[trunc_idx],
+                vec_env.visited_mask[trunc_idx],
+                rm_pen_stack, time_matrix_arr, distance_arr,
+                day_idx_post, num_nodes, MAX_DURATION,
+                trucks_stack_raw=trucks_stack,
+                avail_prob_arr=avail_prob_arr,
+                reward_global_p95=reward_global_p95,
+            )
+            tf_trunc = build_temporal_features_batch(time_el_post, step_cnt_post, MAX_DURATION, num_nodes)
+            mf_trunc = build_market_features_batch(cur_nodes_post, day_idx_post, ltr_stack) if ltr_stack is not None \
+                       else np.zeros((len(trunc_idx), 1), dtype=np.float32)
 
             with torch.no_grad():
-                for step in range(num_nodes):  # defensive ceiling; env terminates naturally
-                    mask = info["action_mask"]   # (N,) int8
-                    current_node_before_step = env.current_node
+                _, _, _, boot_values_t = _forward(
+                    agent, critic,
+                    torch.from_numpy(nf_trunc).to(DEVICE),
+                    torch.from_numpy(tf_trunc).to(DEVICE),
+                    torch.tensor(cur_nodes_post, dtype=torch.long, device=DEVICE),
+                    torch.from_numpy(masks[trunc_idx]).to(DEVICE),
+                    market_feats_t=torch.from_numpy(mf_trunc).to(DEVICE),
+                )
+            boot_values = boot_values_t.cpu().numpy()
 
-                    # Construir rm_pen con el día actual del entorno en este paso
-                    current_day = env.current_day_idx
-                    rm_pen = get_rm_pen(current_day)
+            for i, b in enumerate(trunc_idx):
+                truncated_flags[b] = True
+                last_values[b]     = float(boot_values[i])
 
-                    import torch as _torch
-                    _mask_t = _torch.tensor(mask, dtype=_torch.bool)
-                    if _mask_t.all():
-                        raise RuntimeError(f"Máscara completamente bloqueada en step={step}, node={env.current_node}, visited={env.visited_set}")
-
-
-                    action, log_prob, _, value, nf, tf, mf = agent.act_with_value(
-                        critic,
-                        env.current_node, env.start_node, env.visited_set,
-                        env.time_elapsed, step,
-                        rm_pen, time_matrix, distance_arr,
-                        MAX_DURATION,
-                        action_mask=mask,
-                        ltr_stack=ltr_stack, trucks_stack=trucks_stack,
-                        day_idx=current_day,
-                        avail_prob_arr=avail_prob_arr,
-                        reward_global_p95=reward_global_p95,
-                    )
-
-                    next_obs, reward, terminated, truncated, info = env.step(action)
-                    done = terminated or truncated
-
-                    if truncated:
-                        ep_truncated = True
-                        # ANTES: reward += INCOMPLETE_PENALTY
-                        # Esto sumaba el penalty al reward que va al buffer (línea 354)
-                        # y también a ep_reward (línea 360), contándolo dos veces.
-                        # AHORA: solo se registra en ep_reward como señal de diagnóstico,
-                        # pero NO entra al buffer — GAE lo maneja vía last_value.
-                        current_day_trunc = env.current_day_idx
-                        rm_pen_trunc = get_rm_pen(current_day_trunc)
-                        last_value = agent.estimate_value(
-                            critic,
-                            env.current_node, env.start_node, env.visited_set,
-                            env.time_elapsed, step + 1,
-                            rm_pen_trunc, time_matrix, distance_arr,
-                            MAX_DURATION,
-                            ltr_stack=ltr_stack, trucks_stack=trucks_stack,
-                            day_idx=current_day_trunc,
-                            avail_prob_arr=avail_prob_arr,
-                            reward_global_p95=reward_global_p95,
-                        )
-
-                    buffer.add(
-                        node_feats=nf,
-                        temporal=tf,
-                        current_node=current_node_before_step,
-                        mask=mask,
-                        action=action,
-                        reward=float(reward),   # reward limpio, sin penalty artificial
-                        log_prob=log_prob,      # already float from act_with_value
-                        value=value,
-                        done=done,
-                        market_feats=mf,
-                    )
-
-                    ep_reward += reward
-                    obs = next_obs
-
-                    if done:
-                        break
-
+        # Flatten per-episode accumulators into the main RolloutBuffer
+        # Episodes are written sequentially so compute_gae_per_episode sees
+        # contiguous segments — its logic is unchanged.
+        for b in range(B):
+            if not ep_bufs[b]:
+                continue
+            ep_start = len(buffer)
+            for trans in ep_bufs[b]:
+                buffer.add(
+                    node_feats=trans["node_feats"],
+                    temporal=trans["temporal"],
+                    current_node=trans["current_node"],
+                    mask=trans["mask"],
+                    action=trans["action"],
+                    reward=trans["reward"],
+                    log_prob=trans["log_prob"],
+                    value=trans["value"],
+                    done=trans["done"],
+                    market_feats=trans["market_feats"],
+                )
+            ep_end = len(buffer)
             buffer.episode_boundaries.append(
-                (ep_start_idx, len(buffer), last_value, ep_truncated)
+                (ep_start, ep_end, float(last_values[b]), bool(truncated_flags[b]))
             )
+            ep_reward = sum(t["reward"] for t in ep_bufs[b])
             update_ep_rewards.append(ep_reward)
             episode_rewards.append(ep_reward)
 
