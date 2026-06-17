@@ -250,7 +250,7 @@ def _evaluate_and_report(
 
 def main():
     # ── Cambia estos valores según lo que quieras hacer ───────────────────────
-    NUM_NODES       = 20     # opciones: 10 · 20 · 35 · 50 · 75 · 100
+    NUM_NODES       = 35     # opciones: 10 · 20 · 35 · 50 · 75 · 100
     EVAL_ONLY       = False   # True: carga checkpoint y salta entrenamiento
     N_DAYS_PER_NODE = 3      # días de evaluación por nodo (1 = comportamiento original)
     # ──────────────────────────────────────────────────────────────────────────
