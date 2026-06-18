@@ -33,6 +33,7 @@ import random
 import time
 import warnings
 import numpy as np
+import pandas as pd
 import torch
 
 warnings.filterwarnings("ignore")
@@ -312,6 +313,10 @@ def main():
         with open(tlog_path, "wb") as _f:
             pickle.dump(training_log, _f)
         print(f"training_log guardado en: {tlog_path}")
+
+        tlog_xlsx_path = os.path.join(output_dir, f"training_log_{NUM_NODES}nodes.xlsx")
+        pd.DataFrame(training_log).to_excel(tlog_xlsx_path, index=False)
+        print(f"training_log (Excel) guardado en: {tlog_xlsx_path}")
 
         if training_log:
             conv_result = check_convergence(training_log)

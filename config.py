@@ -52,6 +52,12 @@ PPO_ENTROPY_COEF_START    = 0.08   # coeficiente de entropía al inicio del entr
 PPO_ENTROPY_COEF_END      = 0.02   # coeficiente de entropía al final del entrenamiento (decay lineal)
 PPO_GRAD_CLIP             = 0.5    # Clipping de gradiente para PPO
 
+# ── Self-critical baseline (Camino B: híbrido sobre actor-critic) ────────────
+USE_SELF_CRITICAL            = True   # término self-critical sobre el argmax greedy
+SELF_CRITICAL_COEF           = 0.5     # peso del término self-critical en el loss total
+SELF_CRITICAL_WARMUP_UPDATES = 50      # no aplicar self-critical hasta este update
+                                        # (deja que el crítico se estabilice primero)
+
 # ── Train / eval split ───────────────────────────────────────
 TRAIN_DAYS = 90   # días usados para entrenamiento; el resto (días 90-119) queda para evaluación
 

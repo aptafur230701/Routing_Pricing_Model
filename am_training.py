@@ -34,6 +34,7 @@ from config import (
     PPO_N_EPISODES_PER_UPDATE, PPO_N_EPOCHS, PPO_BATCH_SIZE,
     PPO_LR, PPO_GAMMA, PPO_GAE_LAMBDA, PPO_CLIP_EPS,
     PPO_ENTROPY_COEF, PPO_ENTROPY_COEF_START, PPO_ENTROPY_COEF_END, PPO_GRAD_CLIP,
+    USE_SELF_CRITICAL, SELF_CRITICAL_COEF, SELF_CRITICAL_WARMUP_UPDATES,
 )
 from routing_env import RoutingEnv, VectorRoutingEnv
 from problem_data import build_day_matrices, build_rm_pen_stack
@@ -75,6 +76,9 @@ class RolloutBuffer:
         # Calculados por compute_gae_per_episode()
         self.returns       = None
         self.advantages    = None
+        # Self-critical (Camino B) — poblados solo si USE_SELF_CRITICAL
+        self.sc_advantage  = None   # (n_episodes,) ventaja normalizada por episodio
+        self.episode_idx   = None   # (n_transitions,) índice de episodio por transición
 
     def add(
         self,
@@ -311,6 +315,90 @@ def _evaluate_greedy(
     avg_reward = float(np.mean(rewards)) if rewards else 0.0
     valid_rate = n_valid / n_total
     return avg_reward, valid_rate
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rollout greedy vectorizado para el baseline self-critical (Camino B)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _collect_greedy_rollout(
+    agent:          AMRoutingAgent,
+    vec_env:        VectorRoutingEnv,
+    start_nodes_arr: np.ndarray,
+    start_day_idxs:  np.ndarray,
+    rm_pen_stack:    np.ndarray,
+    time_matrix_arr: np.ndarray,
+    distance_arr:    np.ndarray,
+    trucks_stack:    np.ndarray,
+    avail_prob_arr:  np.ndarray,
+    reward_global_p95: float,
+    ltr_stack:       np.ndarray,
+    num_nodes:       int,
+) -> np.ndarray:
+    """
+    Rollout greedy (argmax, beam=1) vectorizado sobre los MISMOS
+    (start_node, start_day_idx) del update actual.
+
+    Reutiliza VectorRoutingEnv (el mismo step() que la recolección muestreada)
+    en vez de beam_search_dynamic, para que la fórmula de recompensa
+    (REWARD_SCALE_FACTOR, bono de éxito, penalización por tiempo, warning
+    temporal) y la realización estocástica del mundo (draw_lane_availability,
+    determinista en start_day_idx/node/arrival_day) sean IDÉNTICAS a las del
+    rollout muestreado — condición necesaria para que la ventaja self-critical
+    (R_sample - R_greedy) compare en las mismas unidades.
+
+    Asume que agent/critic ya están en eval() (llamado entre la fase de
+    recolección y la fase de update del loop principal). No samplea ni usa
+    RNG global: greedy_action es argmax puro, así que no perturba la
+    secuencia de np.random/torch usada por el resto del loop.
+    """
+    B = len(start_nodes_arr)
+    ep_rewards = np.zeros(B, dtype=np.float32)
+
+    masks  = vec_env.reset(start_nodes_arr, start_day_idxs)
+    active = np.ones(B, dtype=bool)
+
+    with torch.no_grad():
+        for _ in range(num_nodes):   # defensive ceiling, igual que la recolección
+            if not active.any():
+                break
+
+            cur_nodes = vec_env.current_node
+            time_el   = vec_env.time_elapsed
+            step_cnt  = vec_env.step_count
+            day_idx   = vec_env.current_day_idx
+
+            node_feats = build_node_features_batch(
+                cur_nodes, start_nodes_arr, vec_env.visited_mask,
+                rm_pen_stack, time_matrix_arr, distance_arr,
+                day_idx, num_nodes, MAX_DURATION,
+                trucks_stack_raw=trucks_stack,
+                avail_prob_arr=avail_prob_arr,
+                reward_global_p95=reward_global_p95,
+            )
+            temporal = build_temporal_features_batch(time_el, step_cnt, MAX_DURATION, num_nodes)
+            market   = build_market_features_batch(cur_nodes, day_idx, ltr_stack) if ltr_stack is not None \
+                       else np.zeros((B, 1), dtype=np.float32)
+
+            node_feats_t = torch.from_numpy(node_feats).to(DEVICE)
+            temporal_t   = torch.from_numpy(temporal).to(DEVICE)
+            market_t     = torch.from_numpy(market).to(DEVICE)
+            cur_nodes_t  = torch.tensor(cur_nodes, dtype=torch.long, device=DEVICE)
+            mask_t       = torch.from_numpy(masks).to(DEVICE)
+
+            embeddings, graph_emb = agent.encoder(node_feats_t)
+            current_emb = embeddings[torch.arange(B), cur_nodes_t, :]
+            h_t = agent.context_net(graph_emb, current_emb, temporal_t, market_t)
+            actions_t = agent.decoder.greedy_action(h_t, embeddings, mask_t)
+            actions = actions_t.cpu().numpy()
+
+            rewards, terminated, next_masks = vec_env.step(actions)
+            ep_rewards += np.where(active, rewards, 0.0)
+
+            active = active & ~terminated
+            masks  = next_masks
+
+    return ep_rewards
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -565,9 +653,25 @@ def run_am_training(
                 truncated_flags[b] = True
                 last_values[b]     = float(boot_values[i])
 
+        # ── Self-critical baseline (Camino B): rollout greedy vectorizado ──────
+        # Sobre los MISMOS start_nodes_arr/start_day_idxs del rollout muestreado,
+        # para comparar en las mismas unidades y la misma realización del mundo.
+        # Resetea vec_env (su estado post-rollout muestreado ya no se necesita:
+        # el bootstrap de episodios truncados se calculó arriba).
+        if USE_SELF_CRITICAL:
+            greedy_ep_rewards = _collect_greedy_rollout(
+                agent, vec_env, start_nodes_arr, start_day_idxs,
+                rm_pen_stack, time_matrix_arr, distance_arr,
+                trucks_stack, avail_prob_arr, reward_global_p95,
+                ltr_stack, num_nodes,
+            )
+        else:
+            greedy_ep_rewards = None
+
         # Flatten per-episode accumulators into the main RolloutBuffer
         # Episodes are written sequentially so compute_gae_per_episode sees
         # contiguous segments — its logic is unchanged.
+        update_r_greedy = []
         for b in range(B):
             if not ep_bufs[b]:
                 continue
@@ -592,8 +696,31 @@ def run_am_training(
             ep_reward = sum(t["reward"] for t in ep_bufs[b])
             update_ep_rewards.append(ep_reward)
             episode_rewards.append(ep_reward)
+            if USE_SELF_CRITICAL:
+                update_r_greedy.append(float(greedy_ep_rewards[b]))
 
         buffer.compute_gae_per_episode(gamma=gamma, gae_lambda=gae_lambda)
+
+        # ── Ventaja self-critical por episodio (Camino B) ──────────────────────
+        sc_adv_raw_mean = 0.0
+        r_greedy_avg    = 0.0
+        if USE_SELF_CRITICAL:
+            sc_advantage_raw = np.array(update_ep_rewards, dtype=np.float32) \
+                              - np.array(update_r_greedy,  dtype=np.float32)
+            sc_adv_raw_mean = float(sc_advantage_raw.mean())
+            r_greedy_avg    = float(np.mean(update_r_greedy))
+
+            sc_advantage_norm = (
+                (sc_advantage_raw - sc_advantage_raw.mean())
+                / (sc_advantage_raw.std() + 1e-8)
+            )
+
+            episode_idx_arr = np.zeros(len(buffer), dtype=np.int64)
+            for k, (s, e, _, _) in enumerate(buffer.episode_boundaries):
+                episode_idx_arr[s:e] = k
+
+            buffer.sc_advantage = sc_advantage_norm
+            buffer.episode_idx  = episode_idx_arr
 
         # ── Fase 2: Actualización PPO ─────────────────────────────────────────
         agent.train()
@@ -605,6 +732,8 @@ def run_am_training(
         batch_entropies     = []
         batch_kl_divs       = []
         batch_clip_fracs    = []
+        batch_sc_losses     = []
+        apply_self_critical = USE_SELF_CRITICAL and update >= SELF_CRITICAL_WARMUP_UPDATES
 
         for _ in range(n_ppo_epochs):
 
@@ -645,6 +774,12 @@ def run_am_training(
                     buffer.advantages[idx_batch], dtype=torch.float32
                 ).to(DEVICE)                                           # (B,)
 
+                if apply_self_critical:
+                    sc_adv_b = torch.tensor(
+                        buffer.sc_advantage[buffer.episode_idx[idx_batch]],
+                        dtype=torch.float32,
+                    ).to(DEVICE)                                       # (B,)
+
                 # Normalización por mini-batch: cada gradiente ve ventajas
                 # con media=0, std=1, independiente del resto del buffer.
                 # Más estable que normalizar el buffer completo una sola vez
@@ -684,6 +819,12 @@ def run_am_training(
                     entropy_loss = -entropy.mean()
 
                     actor_loss_total = actor_loss + entropy_coef * entropy_loss
+
+                    # ── Self-critical (Camino B): término REINFORCE adicional ──
+                    # No toca el critic — sc_loss depende solo de new_lp (actor).
+                    if apply_self_critical:
+                        sc_loss = -(SELF_CRITICAL_COEF * sc_adv_b * new_lp).mean()
+                        actor_loss_total = actor_loss_total + sc_loss
 
                 except RuntimeError as e:
                     sep = "=" * 60
@@ -747,6 +888,8 @@ def run_am_training(
                 batch_entropies.append(entropy.mean().item())
                 batch_kl_divs.append(approx_kl)
                 batch_clip_fracs.append(clip_frac)
+                if apply_self_critical:
+                    batch_sc_losses.append(sc_loss.item())
 
             if kl_too_high:  # sale también de n_ppo_epochs
                 break
@@ -767,6 +910,7 @@ def run_am_training(
         avg_entropy   = float(np.mean(batch_entropies))     if batch_entropies     else 0.0
         avg_kl        = float(np.mean(batch_kl_divs))       if batch_kl_divs       else 0.0
         avg_clip_frac = float(np.mean(batch_clip_fracs))    if batch_clip_fracs    else 0.0
+        avg_sc_loss   = float(np.mean(batch_sc_losses))     if batch_sc_losses     else 0.0
 
         episode_losses.append(avg_loss)
         log_entry = {
@@ -781,6 +925,10 @@ def run_am_training(
             "explained_var":    explained_var,
             "entropy_coef":     entropy_coef,
         }
+        if USE_SELF_CRITICAL:
+            log_entry["r_greedy_avg"]      = r_greedy_avg
+            log_entry["sc_advantage_mean"] = sc_adv_raw_mean
+            log_entry["sc_loss_value"]     = avg_sc_loss
 
         log_freq = max(1, n_updates // 20)
         if (update + 1) % log_freq == 0:
@@ -793,6 +941,11 @@ def run_am_training(
             log_entry["greedy_valid_rate"] = greedy_valid_rate
 
             episodes_done = (update + 1) * n_episodes_per_update
+            sc_log_suffix = (
+                f" | r_greedy {r_greedy_avg:6.1f}"
+                f" | sc_adv {sc_adv_raw_mean:6.2f}"
+                f" | sc_loss {avg_sc_loss:.4f}"
+            ) if USE_SELF_CRITICAL else ""
             print(
                 f"  update {update+1:>5}/{n_updates} "
                 f"| ep {episodes_done:>6}/{total_episodes} "
@@ -806,6 +959,7 @@ def run_am_training(
                 f"| kl {avg_kl:.4f} "
                 f"| clip {avg_clip_frac:.2f} "
                 f"| ev {explained_var:.3f}"
+                f"{sc_log_suffix}"
             )
 
         training_log.append(log_entry)
