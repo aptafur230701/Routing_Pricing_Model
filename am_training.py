@@ -30,10 +30,11 @@ from config import (
     TRAIN_DAYS,
     N_EVAL_EPISODES,
     get_episodes_per_node,
-    AM_D_H, AM_N_HEADS, AM_N_LAYERS, AM_D_FF,
+    AM_D_H, AM_N_HEADS, AM_N_LAYERS, AM_D_FF, AM_PRE_NORM, AM_DROPOUT,
     PPO_N_EPISODES_PER_UPDATE, PPO_N_EPOCHS, PPO_BATCH_SIZE,
     PPO_LR, PPO_GAMMA, PPO_GAE_LAMBDA, PPO_CLIP_EPS,
     PPO_ENTROPY_COEF, PPO_ENTROPY_COEF_START, PPO_ENTROPY_COEF_END, PPO_GRAD_CLIP,
+    PPO_WEIGHT_DECAY,
     USE_SELF_CRITICAL, SELF_CRITICAL_COEF, SELF_CRITICAL_WARMUP_UPDATES,
 )
 from routing_env import RoutingEnv, VectorRoutingEnv
@@ -465,7 +466,10 @@ def run_am_training(
 
     # ── Modelos ───────────────────────────────────────────────────────────────
     agent  = pretrained_agent  if pretrained_agent  is not None \
-             else AMRoutingAgent(num_nodes, d_h, n_heads, n_layers, d_ff, device=DEVICE)
+             else AMRoutingAgent(
+                 num_nodes, d_h, n_heads, n_layers, d_ff, device=DEVICE,
+                 pre_norm=AM_PRE_NORM, dropout=AM_DROPOUT,
+             )
     critic = pretrained_critic if pretrained_critic is not None \
              else CriticHead(d_h).to(DEVICE)
 
@@ -473,7 +477,11 @@ def run_am_training(
     # para dar señales de ventaja de calidad. Con un optimizer compartido y lr=3e-5
     # el critic aprende demasiado lento y el EV se estanca por debajo de 0.7.
     # Ratio 10x entre critic y actor es estándar en PPO para problemas combinatorios.
-    actor_optimizer  = torch.optim.Adam(agent.parameters(),  lr=lr)
+    # Actor con AdamW: weight_decay es el regularizador PPO-safe primario (no
+    # corrompe el ratio de importancia como lo haría dropout en el path de logits).
+    # Critic se deja en Adam puro (sin weight decay): su objetivo es MSE de
+    # regresión, no política, y no comparte el problema de corrupción del ratio.
+    actor_optimizer  = torch.optim.AdamW(agent.parameters(),  lr=lr, weight_decay=PPO_WEIGHT_DECAY)
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=lr * 10)
 
     # ── Precomputar stack de reward matrices (una sola vez, fuera del loop) ──────

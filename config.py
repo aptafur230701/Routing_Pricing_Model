@@ -35,6 +35,12 @@ AM_D_H      = 192  # Dimensión de embeddings del Transformer. Subido de 128: la
 AM_N_HEADS  = 8    # Número de cabezas de atención en el Transformer (192/8=24, exacto)
 AM_N_LAYERS = 4    # Número de capas del encoder Transformer. Subido de 3 junto con AM_D_H.
 AM_D_FF     = 768  # Dimensión de la capa feed-forward. Mantiene la proporción 4×AM_D_H.
+AM_PRE_NORM = True  # Pre-norm (True) vs post-norm (False) en TransformerEncoderLayer.
+                    # Ablacionable: False reproduce el comportamiento post-norm anterior.
+AM_DROPOUT  = 0.0   # Dropout en las sublayers del encoder (nunca en el path de logits del
+                    # decoder). Ablacionable: probar 0.05 / 0.1 con cuidado — en PPO el
+                    # dropout puede corromper el ratio de importancia si old/new log_probs
+                    # se calculan con distinto modo train/eval.
 
 # ── PPO hyperparameters ───────────────────────────────────────
 PPO_N_EPISODES_PER_UPDATE = 700    # Episodios recolectados antes de cada update PPO
@@ -43,7 +49,10 @@ PPO_BATCH_SIZE            = 256    # Tamaño de batch para entrenamiento PPO. Su
                                     # está dominada por overhead de lanzamiento de kernels a batch
                                     # pequeño (tiempo/batch ~constante de 64 a 700), así que un batch
                                     # mayor da ~3.4x más rápido por update con caída mínima de EV.
-PPO_LR                    = 1e-5   # Learning rate para el actor
+PPO_LR                    = 3e-5   # Learning rate para el actor. Subido de 1e-5: la KL media
+                                    # iba muy por debajo del target 0.02 con clip < 0.10,
+                                    # indicando under-stepping. knob: subir hacia 5e-5 si KL se
+                                    # mantiene < ~0.015 y el reward sigue subiendo pasado update 150.
 PPO_GAMMA                 = 0.99   # Factor de descuento para las recompensas futuras
 PPO_GAE_LAMBDA            = 0.95   # Factor de GAE
 PPO_CLIP_EPS              = 0.15   # Clip PPO para limitar cambios de política
@@ -51,6 +60,17 @@ PPO_ENTROPY_COEF          = 0.05   # Coeficiente de entropía para PPO (valor de
 PPO_ENTROPY_COEF_START    = 0.08   # coeficiente de entropía al inicio del entrenamiento
 PPO_ENTROPY_COEF_END      = 0.02   # coeficiente de entropía al final del entrenamiento (decay lineal)
 PPO_GRAD_CLIP             = 0.5    # Clipping de gradiente para PPO
+PPO_WEIGHT_DECAY          = 1e-4   # Weight decay (AdamW) del actor. Regularizador PRIMARIO
+                                    # PPO-safe: no corrompe el ratio de importancia como el
+                                    # dropout en el path de logits.
+PPO_LR_DECAY              = False  # Scheduler de LR lineal decreciente (espeja el decay de
+                                    # entropía). Apagado por default; opcional.
+
+# ── Reward shaping ablacionable ───────────────────────────────
+TEMPORAL_WARNING_COEF = 0.05   # Coeficiente del término temporal_warning (callejón temporal).
+                                # Hipótesis: enseña cautela prematura y contribuye al
+                                # under-visiting. Default 0.05 reproduce el comportamiento
+                                # actual; 0.0 lo desactiva.
 
 # ── Self-critical baseline (Camino B: híbrido sobre actor-critic) ────────────
 USE_SELF_CRITICAL            = True   # término self-critical sobre el argmax greedy

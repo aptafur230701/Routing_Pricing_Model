@@ -41,6 +41,7 @@ from config import (
     REWARD_SCALE_FACTOR,
     RETURN_SUCCESS_BONUS,
     TIME_VIOLATION_PENALTY,
+    TEMPORAL_WARNING_COEF,
 )
 from state_features import get_state_size, build_state
 from problem_data import build_day_matrices, draw_lane_availability
@@ -242,7 +243,7 @@ class RoutingEnv(gym.Env):
         if not terminated and next_node != self._start_node:
             t_return = float(self._time_matrix[next_node, self._start_node])
             if self.max_duration < next_time + t_return:
-                temporal_warning = 0.05 * TIME_VIOLATION_PENALTY
+                temporal_warning = TEMPORAL_WARNING_COEF * TIME_VIOLATION_PENALTY
 
         return step_reward + terminal_reward + temporal_warning
 
@@ -494,7 +495,7 @@ class VectorRoutingEnv:
             & (actions != self._start_node)
             & (self.max_duration < next_time + t_return)
         )
-        temporal_warning = np.where(warn_mask, 0.05 * TIME_VIOLATION_PENALTY, 0.0).astype(np.float32)
+        temporal_warning = np.where(warn_mask, TEMPORAL_WARNING_COEF * TIME_VIOLATION_PENALTY, 0.0).astype(np.float32)
 
         rewards = np.where(
             self._active,

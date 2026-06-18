@@ -218,8 +218,9 @@ class TransformerEncoderLayer(nn.Module):
     Salida  : (batch, N, d_h)
     """
 
-    def __init__(self, d_h: int, n_heads: int, d_ff: int):
+    def __init__(self, d_h: int, n_heads: int, d_ff: int, pre_norm: bool = True, dropout: float = 0.0):
         super().__init__()
+        self.pre_norm = pre_norm
         self.mha   = MultiHeadSelfAttention(d_h, n_heads)
         self.norm1 = nn.LayerNorm(d_h)
         self.ffn   = nn.Sequential(
@@ -228,10 +229,15 @@ class TransformerEncoderLayer(nn.Module):
             nn.Linear(d_ff, d_h),
         )
         self.norm2 = nn.LayerNorm(d_h)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.norm1(x + self.mha(x))
-        x = self.norm2(x + self.ffn(x))
+        if self.pre_norm:
+            x = x + self.dropout(self.mha(self.norm1(x)))
+            x = x + self.dropout(self.ffn(self.norm2(x)))
+        else:
+            x = self.norm1(x + self.mha(x))
+            x = self.norm2(x + self.ffn(x))
         return x
 
 
@@ -264,18 +270,24 @@ class AttentionEncoder(nn.Module):
         n_heads:  int = 8,
         n_layers: int = 3,
         d_ff:     int = 512,
+        pre_norm: bool = True,
+        dropout:  float = 0.0,
     ):
         super().__init__()
+        self.pre_norm = pre_norm
         self.input_proj = NodeFeatureProjection(d_input, d_h)
         self.layers = nn.ModuleList([
-            TransformerEncoderLayer(d_h, n_heads, d_ff)
+            TransformerEncoderLayer(d_h, n_heads, d_ff, pre_norm=pre_norm, dropout=dropout)
             for _ in range(n_layers)
         ])
+        self.norm_out = nn.LayerNorm(d_h)
 
     def forward(self, node_features: torch.Tensor):
         x = self.input_proj(node_features)   # (batch, N, d_h)
         for layer in self.layers:
             x = layer(x)                     # (batch, N, d_h)
+        if self.pre_norm:
+            x = self.norm_out(x)
         graph_emb = x.mean(dim=1)            # (batch, d_h)
         return x, graph_emb
 

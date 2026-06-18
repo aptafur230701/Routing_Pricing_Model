@@ -49,6 +49,8 @@ class AMRoutingAgent(nn.Module):
     d_ff      : int   — dimensión interna FFN (default 512).
     clip_C    : float — clipping tanh del pointer (default 10.0).
     device    : torch.device
+    pre_norm  : bool  — pre-norm (True) vs post-norm (False) en el encoder (default True).
+    dropout   : float — dropout en las sublayers del encoder (default 0.0).
     """
 
     def __init__(
@@ -60,13 +62,18 @@ class AMRoutingAgent(nn.Module):
         d_ff:      int   = 512,
         clip_C:    float = 10.0,
         device:    torch.device = None,
+        pre_norm:  bool  = True,
+        dropout:   float = 0.0,
     ):
         super().__init__()
         self.num_nodes = num_nodes
         self.d_h       = d_h
         self.device    = device or torch.device("cpu")
 
-        self.encoder     = AttentionEncoder(N_NODE_FEATURES, d_h, n_heads, n_layers, d_ff)
+        self.encoder     = AttentionEncoder(
+            N_NODE_FEATURES, d_h, n_heads, n_layers, d_ff,
+            pre_norm=pre_norm, dropout=dropout,
+        )
         self.context_net = ContextNetwork(d_h, n_market=1)
         self.decoder     = AttentionDecoder(d_h, n_heads_glimpse=n_heads, clip_C=clip_C)
 
