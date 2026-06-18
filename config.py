@@ -63,8 +63,14 @@ PPO_GRAD_CLIP             = 0.5    # Clipping de gradiente para PPO
 PPO_WEIGHT_DECAY          = 1e-4   # Weight decay (AdamW) del actor. Regularizador PRIMARIO
                                     # PPO-safe: no corrompe el ratio de importancia como el
                                     # dropout en el path de logits.
-PPO_LR_DECAY              = False  # Scheduler de LR lineal decreciente (espeja el decay de
-                                    # entropía). Apagado por default; opcional.
+PPO_LR_DECAY              = True   # Scheduler de LR lineal decreciente (espeja el decay de
+                                    # entropía). Activado: la corrida R2 (LR=3e-5 constante)
+                                    # mostró KL fuera de control en régimen estacionario
+                                    # (violation_fraction 0.26 sobre umbral 0.02 en los últimos
+                                    # 50 updates) — decae LR de PPO_LR a PPO_LR_END para
+                                    # conservar el avance temprano sin desestabilizar al final.
+PPO_LR_END                = 1e-5   # LR del actor al final del entrenamiento si PPO_LR_DECAY=True.
+                                    # Vuelve al valor original (pre-6c), donde KL era saludable.
 
 # ── Reward shaping ablacionable ───────────────────────────────
 TEMPORAL_WARNING_COEF = 0.05   # Coeficiente del término temporal_warning (callejón temporal).
@@ -95,7 +101,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def get_episodes_per_node(num_nodes: int) -> int:
     """Episodes per start-node for the full training run."""
     if num_nodes <= 10:  return 5000
-    if num_nodes <= 20:  return 15000
+    if num_nodes <= 20:  return 8000
     if num_nodes <= 35:  return 10000   # bajado de 25000: la política saturaba ~update 400;
                                         # con ~700 ep/update da ~500-600 updates, holgura sobre
                                         # el punto de saturación observado
@@ -108,7 +114,7 @@ def get_beam_width_det(num_nodes: int) -> int:
     """Beam width for inference, scaled by problem size.
     Modelos pequeños necesitan más exploración en inferencia.
     Modelos grandes tienen políticas más robustas y beam=1 es suficiente."""
-    if num_nodes <= 10: return 5    # modelo pequeño, necesita más exploración
+    if num_nodes <= 10: return 7    # modelo pequeño, necesita más exploración
     if num_nodes <= 20: return 7   # validado empíricamente: gap bajó de ~20-29% a ~14-16% vs beam=5
     if num_nodes <= 35: return 7   # balance costo/calidad
     if num_nodes <= 50: return 8
@@ -121,7 +127,7 @@ def get_beam_width_real(num_nodes: int) -> int:
     Validado empíricamente sobre nodos con gap >20%: beam=20 satura
     la mejora (beam=30 no produce cambios adicionales); beam=10-14
     deja gap residual de exploración sin explotar."""
-    if num_nodes <= 10: return 10
+    if num_nodes <= 10: return 7
     if num_nodes <= 20: return 7
     if num_nodes <= 35: return 7
     if num_nodes <= 50: return 10

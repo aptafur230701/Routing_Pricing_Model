@@ -34,7 +34,7 @@ from config import (
     PPO_N_EPISODES_PER_UPDATE, PPO_N_EPOCHS, PPO_BATCH_SIZE,
     PPO_LR, PPO_GAMMA, PPO_GAE_LAMBDA, PPO_CLIP_EPS,
     PPO_ENTROPY_COEF, PPO_ENTROPY_COEF_START, PPO_ENTROPY_COEF_END, PPO_GRAD_CLIP,
-    PPO_WEIGHT_DECAY,
+    PPO_WEIGHT_DECAY, PPO_LR_DECAY, PPO_LR_END,
     USE_SELF_CRITICAL, SELF_CRITICAL_COEF, SELF_CRITICAL_WARMUP_UPDATES,
 )
 from routing_env import RoutingEnv, VectorRoutingEnv
@@ -530,6 +530,12 @@ def run_am_training(
         progress     = update / max(1, n_updates - 1)
         entropy_coef = PPO_ENTROPY_COEF_START + (PPO_ENTROPY_COEF_END - PPO_ENTROPY_COEF_START) * progress
 
+        # LR del actor: decae linealmente de PPO_LR a PPO_LR_END si PPO_LR_DECAY,
+        # constante en PPO_LR en caso contrario. El critic mantiene el ratio 10x.
+        actor_lr = lr + (PPO_LR_END - lr) * progress if PPO_LR_DECAY else lr
+        actor_optimizer.param_groups[0]["lr"]  = actor_lr
+        critic_optimizer.param_groups[0]["lr"] = actor_lr * 10
+
         buffer = RolloutBuffer()
         update_ep_rewards = []
 
@@ -932,6 +938,7 @@ def run_am_training(
             "clip_fraction":    avg_clip_frac,
             "explained_var":    explained_var,
             "entropy_coef":     entropy_coef,
+            "actor_lr":         actor_lr,
         }
         if USE_SELF_CRITICAL:
             log_entry["r_greedy_avg"]      = r_greedy_avg
