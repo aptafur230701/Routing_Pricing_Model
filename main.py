@@ -43,6 +43,7 @@ print(sys.executable)
 from config import (
     SEED, DEVICE,
     get_episodes_per_node, TRAIN_DAYS,
+    AM_D_H, AM_N_HEADS, AM_N_LAYERS, AM_D_FF,
 )
 from problem_data import load_matrices
 from evaluation import (
@@ -105,7 +106,9 @@ def _load_agent(checkpoint_dir: str, num_nodes: int) -> "AMRoutingAgent":
     if not os.path.exists(path):
         raise FileNotFoundError(f"Checkpoint no encontrado: {path}")
     ckpt  = torch.load(path, map_location=DEVICE)
-    agent = AMRoutingAgent(num_nodes, device=DEVICE)
+    agent = AMRoutingAgent(
+        num_nodes, AM_D_H, AM_N_HEADS, AM_N_LAYERS, AM_D_FF, device=DEVICE
+    )
     agent.load_state_dict(ckpt["agent"])
     agent.eval()
     print(f"Checkpoint cargado: {path}")
@@ -252,6 +255,9 @@ def main():
     # ── Cambia estos valores según lo que quieras hacer ───────────────────────
     NUM_NODES       = 35     # opciones: 10 · 20 · 35 · 50 · 75 · 100
     EVAL_ONLY       = False   # True: carga checkpoint y salta entrenamiento
+    USE_TRANSFER    = False   # True: warm-start desde el checkpoint del tamaño anterior en
+                              # NODE_SEQUENCE (requiere mismo AM_D_H/AM_N_LAYERS que la fuente).
+                              # False: entrena desde pesos aleatorios con la arquitectura de config.py.
     N_DAYS_PER_NODE = 3      # días de evaluación por nodo (1 = comportamiento original)
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -286,7 +292,10 @@ def main():
         agent_am  = _load_agent(checkpoint_dir, NUM_NODES)
         ep_r, ep_l, t, training_log = [], [], 0.0, []
     else:
-        agent_pretrained, critic_pretrained = build_agent_for_training(checkpoint_dir, NUM_NODES)
+        agent_pretrained, critic_pretrained = build_agent_for_training(
+            checkpoint_dir, NUM_NODES, use_transfer=USE_TRANSFER,
+            d_h=AM_D_H, n_heads=AM_N_HEADS, n_layers=AM_N_LAYERS, d_ff=AM_D_FF,
+        )
         agent_am, ep_r, ep_l, t, training_log = _run_am(
             NUM_NODES, time_matrix, rate_train, loads_train,
             distance_arr, diesel_arr, checkpoint_dir,

@@ -29,15 +29,20 @@ BIG_M_PENALTY          = -1e9
 N_EVAL_EPISODES = 50
 
 # ── AM Model architecture ─────────────────────────────────────
-AM_D_H      = 128  # Dimensión de embeddings del Transformer. Kool las usa hasta 100 nodos
-AM_N_HEADS  = 8    # Número de cabezas de atención en el Transformer
-AM_N_LAYERS = 3    # Número de capas del encoder Transformer. Kool las usa hasta 100 nodos
-AM_D_FF     = 512  # Dimensión de la capa feed-forward
+AM_D_H      = 192  # Dimensión de embeddings del Transformer. Subido de 128: la política greedy
+                    # saturaba en una meseta ~update 300-400 con crítico sano, indicando techo
+                    # de capacidad de representación a 35 nodos, no inestabilidad de PPO.
+AM_N_HEADS  = 8    # Número de cabezas de atención en el Transformer (192/8=24, exacto)
+AM_N_LAYERS = 4    # Número de capas del encoder Transformer. Subido de 3 junto con AM_D_H.
+AM_D_FF     = 768  # Dimensión de la capa feed-forward. Mantiene la proporción 4×AM_D_H.
 
 # ── PPO hyperparameters ───────────────────────────────────────
-PPO_N_EPISODES_PER_UPDATE = 360    # Episodios recolectados antes de cada update PPO
+PPO_N_EPISODES_PER_UPDATE = 700    # Episodios recolectados antes de cada update PPO
 PPO_N_EPOCHS              = 4      # Épocas de entrenamiento PPO por rollout
-PPO_BATCH_SIZE            = 64     # Tamaño de batch para entrenamiento PPO
+PPO_BATCH_SIZE            = 256    # Tamaño de batch para entrenamiento PPO. Subido de 64: la GPU
+                                    # está dominada por overhead de lanzamiento de kernels a batch
+                                    # pequeño (tiempo/batch ~constante de 64 a 700), así que un batch
+                                    # mayor da ~3.4x más rápido por update con caída mínima de EV.
 PPO_LR                    = 1e-5   # Learning rate para el actor
 PPO_GAMMA                 = 0.99   # Factor de descuento para las recompensas futuras
 PPO_GAE_LAMBDA            = 0.95   # Factor de GAE
@@ -65,7 +70,9 @@ def get_episodes_per_node(num_nodes: int) -> int:
     """Episodes per start-node for the full training run."""
     if num_nodes <= 10:  return 5000
     if num_nodes <= 20:  return 15000
-    if num_nodes <= 35:  return 25000
+    if num_nodes <= 35:  return 10000   # bajado de 25000: la política saturaba ~update 400;
+                                        # con ~700 ep/update da ~500-600 updates, holgura sobre
+                                        # el punto de saturación observado
     if num_nodes <= 50:  return 32000
     if num_nodes <= 75:  return 38000
     return 43000          # 100 nodos
@@ -77,7 +84,7 @@ def get_beam_width_det(num_nodes: int) -> int:
     Modelos grandes tienen políticas más robustas y beam=1 es suficiente."""
     if num_nodes <= 10: return 5    # modelo pequeño, necesita más exploración
     if num_nodes <= 20: return 10   # validado empíricamente: gap bajó de ~20-29% a ~14-16% vs beam=5
-    if num_nodes <= 35: return 10   # balance costo/calidad
+    if num_nodes <= 35: return 1   # balance costo/calidad
     if num_nodes <= 50: return 8
     if num_nodes <= 75: return 4
     return 3                       # modelo grande, confiar en la política
@@ -90,7 +97,7 @@ def get_beam_width_real(num_nodes: int) -> int:
     deja gap residual de exploración sin explotar."""
     if num_nodes <= 10: return 10
     if num_nodes <= 20: return 20
-    if num_nodes <= 35: return 14
+    if num_nodes <= 35: return 1
     if num_nodes <= 50: return 10
     if num_nodes <= 75: return 6
     return 5

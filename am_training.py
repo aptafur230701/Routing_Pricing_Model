@@ -28,6 +28,7 @@ from config import (
     DEVICE,
     SEED,
     TRAIN_DAYS,
+    N_EVAL_EPISODES,
     get_episodes_per_node,
     AM_D_H, AM_N_HEADS, AM_N_LAYERS, AM_D_FF,
     PPO_N_EPISODES_PER_UPDATE, PPO_N_EPOCHS, PPO_BATCH_SIZE,
@@ -253,6 +254,66 @@ def _forward(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Evaluación greedy periódica (observacional, no afecta gradientes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _evaluate_greedy(
+    agent,
+    eval_start_nodes: np.ndarray,
+    eval_start_days:  np.ndarray,
+    time_matrix,
+    rate_stack:       np.ndarray,
+    loads_stack:      np.ndarray,
+    distance_arr:     np.ndarray,
+    diesel_arr:       np.ndarray,
+    ltr_stack:        np.ndarray,
+    trucks_stack:     np.ndarray,
+    avail_prob_arr:   np.ndarray,
+    reward_global_p95: float,
+) -> tuple:
+    """
+    Recompensa promedio en modo greedy (beam_width=1) sobre un set fijo de
+    episodios (mismos nodos de inicio y días entre llamadas), para monitorear
+    el desempeño en el modo que de verdad se usa en producción — distinto del
+    avg_reward de los rollouts de entrenamiento, que samplean de la política.
+
+    beam_search_dynamic devuelve route=None, reward=-np.inf cuando ningún beam
+    logra cerrar el ciclo de regreso al depot dentro de max_duration. Esos
+    episodios se excluyen del promedio de reward (para no contaminarlo con
+    -inf) y se cuentan aparte en valid_rate.
+
+    Retorna
+    -------
+    avg_reward : float — promedio solo sobre episodios con ruta válida
+                 (0.0 si ninguno fue válido).
+    valid_rate : float — fracción de episodios con ruta válida.
+    """
+    agent.eval()
+    rewards = []
+    n_valid = 0
+    try:
+        with torch.no_grad():
+            for start_node, start_day in zip(eval_start_nodes, eval_start_days):
+                route, reward, _ = agent.beam_search_dynamic(
+                    int(start_node), int(start_day),
+                    time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
+                    MAX_DURATION, beam_width=1,
+                    ltr_stack=ltr_stack, trucks_stack=trucks_stack,
+                    avail_prob_arr=avail_prob_arr,
+                    reward_global_p95=reward_global_p95,
+                )
+                if route is not None:
+                    n_valid += 1
+                    rewards.append(reward)
+    finally:
+        agent.train()
+    n_total    = len(eval_start_nodes)
+    avg_reward = float(np.mean(rewards)) if rewards else 0.0
+    valid_rate = n_valid / n_total
+    return avg_reward, valid_rate
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Función principal de entrenamiento
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -355,6 +416,14 @@ def run_am_training(
         f"\n--- Entrenamiento AM-PPO: {total_episodes} episodios "
         f"({n_updates} updates × {n_episodes_per_update} ep/update) ---"
     )
+
+    # ── Set fijo de evaluación greedy (mismos episodios en cada chequeo) ──────
+    # RandomState propio, separado del RNG global de numpy: así no perturba la
+    # secuencia de muestreo de start_nodes/start_day_idxs del loop de entrenamiento.
+    n_eval_episodes = min(N_EVAL_EPISODES, num_nodes, 20)
+    eval_rng         = np.random.RandomState(SEED)
+    eval_start_nodes = eval_rng.choice(num_nodes, size=n_eval_episodes, replace=False)
+    eval_start_days  = eval_rng.randint(0, num_train_days, size=n_eval_episodes)
 
     episode_rewards = []
     episode_losses  = []
@@ -646,13 +715,15 @@ def run_am_training(
                     raise
 
                 # ── Update actor & critic ─────────────────────────────────
-                # Ambos .backward() deben ejecutarse antes de cualquier
-                # .step() para evitar que las actualizaciones in-place del
-                # optimizador invaliden el grafo compartido del forward pass.
+                # value_loss también backpropaga hacia el encoder/context_net
+                # del actor (h_t no se detacha antes del critic), así que un
+                # solo backward sobre la suma evita recorrer ese tramo
+                # compartido dos veces — los gradientes resultantes son
+                # idénticos a hacer backward por separado (gradiente de la
+                # suma = suma de gradientes), pero ~1.3x más rápido.
                 actor_optimizer.zero_grad()
                 critic_optimizer.zero_grad()
-                actor_loss_total.backward(retain_graph=True)
-                value_loss.backward()
+                (actor_loss_total + value_loss).backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), grad_clip)
                 actor_optimizer.step()
                 nn.utils.clip_grad_norm_(critic.parameters(), grad_clip)
@@ -698,7 +769,7 @@ def run_am_training(
         avg_clip_frac = float(np.mean(batch_clip_fracs))    if batch_clip_fracs    else 0.0
 
         episode_losses.append(avg_loss)
-        training_log.append({
+        log_entry = {
             "update":           update + 1,
             "reward":           avg_reward,
             "total_loss":       avg_loss,
@@ -709,15 +780,25 @@ def run_am_training(
             "clip_fraction":    avg_clip_frac,
             "explained_var":    explained_var,
             "entropy_coef":     entropy_coef,
-        })
+        }
 
         log_freq = max(1, n_updates // 20)
         if (update + 1) % log_freq == 0:
+            greedy_reward, greedy_valid_rate = _evaluate_greedy(
+                agent, eval_start_nodes, eval_start_days,
+                time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
+                ltr_stack, trucks_stack, avail_prob_arr, reward_global_p95,
+            )
+            log_entry["greedy_reward"]     = greedy_reward
+            log_entry["greedy_valid_rate"] = greedy_valid_rate
+
             episodes_done = (update + 1) * n_episodes_per_update
             print(
                 f"  update {update+1:>5}/{n_updates} "
                 f"| ep {episodes_done:>6}/{total_episodes} "
                 f"| reward {avg_reward:6.1f} "
+                f"| greedy {greedy_reward:6.1f} "
+                f"| greedy_valid {greedy_valid_rate:.2f} "
                 f"| loss {avg_loss:.4f} "
                 f"| pol {avg_pol_loss:.4f} "
                 f"| val {avg_val_loss:.4f} "
@@ -726,6 +807,8 @@ def run_am_training(
                 f"| clip {avg_clip_frac:.2f} "
                 f"| ev {explained_var:.3f}"
             )
+
+        training_log.append(log_entry)
 
     print("Entrenamiento AM-PPO completo.")
     return agent, critic, episode_rewards, episode_losses, training_log

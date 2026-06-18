@@ -372,7 +372,7 @@ def plot_ppo_diagnostics(training_log: list, num_nodes: int, output_path: str):
         import pandas as pd
         df = pd.DataFrame(training_log)
 
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig, axes = plt.subplots(2, 4, figsize=(24, 10))
         fig.suptitle(
             f'PPO Internal Diagnostics — {num_nodes} nodes', fontsize=14
         )
@@ -388,10 +388,31 @@ def plot_ppo_diagnostics(training_log: list, num_nodes: int, output_path: str):
                            label=hline_label or f"{hline}")
                 ax.legend(fontsize=8)
 
-        _plot(axes[0, 0], df["reward"],       "Avg Reward per Update",   "Reward",       "steelblue")
+        # greedy_reward / greedy_valid_rate solo se registran cada log_freq
+        # updates — el resto queda NaN en el DataFrame. dropna() evita que la
+        # línea se corte en cada hueco.
+        greedy_df = df.dropna(subset=["greedy_reward"]) if "greedy_reward" in df else None
+
+        ax_reward = axes[0, 0]
+        ax_reward.plot(updates, df["reward"], linewidth=0.9, color="steelblue", label="Sampled reward")
+        if greedy_df is not None and not greedy_df.empty:
+            ax_reward.plot(greedy_df["update"], greedy_df["greedy_reward"],
+                           linewidth=1.4, color="darkorange", marker="o", markersize=3,
+                           label="Greedy reward")
+        ax_reward.set_title("Avg Reward per Update"); ax_reward.set_xlabel("PPO Update")
+        ax_reward.set_ylabel("Reward"); ax_reward.grid(True, alpha=0.3); ax_reward.legend(fontsize=8)
+
         _plot(axes[0, 1], df["explained_var"], "Critic Explained Variance", "Expl. Var.", "mediumseagreen",
               hline=0.5, hline_label="threshold 0.5")
         _plot(axes[0, 2], df["entropy"],       "Policy Entropy",          "Entropy",      "mediumpurple")
+
+        ax_valid = axes[0, 3]
+        if greedy_df is not None and not greedy_df.empty:
+            ax_valid.plot(greedy_df["update"], greedy_df["greedy_valid_rate"],
+                          linewidth=1.4, color="teal", marker="o", markersize=3)
+            ax_valid.set_ylim(-0.05, 1.05)
+        ax_valid.set_title("Greedy Valid Route Rate"); ax_valid.set_xlabel("PPO Update")
+        ax_valid.set_ylabel("Valid Rate"); ax_valid.grid(True, alpha=0.3)
 
         ax_loss = axes[1, 0]
         ax_loss.plot(updates, df["policy_loss"], linewidth=0.9, color="coral",    label="Policy loss")
@@ -403,6 +424,7 @@ def plot_ppo_diagnostics(training_log: list, num_nodes: int, output_path: str):
               hline=0.02, hline_label="target 0.02")
         _plot(axes[1, 2], df["clip_fraction"], "PPO Clip Fraction",       "Clip Frac.",   "darkorange",
               hline=0.1, hline_label="ref 0.10")
+        axes[1, 3].axis("off")
 
         plt.tight_layout()
         plt.savefig(output_path, dpi=150)
