@@ -19,7 +19,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from config import MAX_DURATION
+from config import MAX_DURATION, REWARD_SCALE_FACTOR
 from attention_encoder import (
     AttentionEncoder,
     ContextNetwork,
@@ -162,6 +162,8 @@ class AMRoutingAgent(nn.Module):
         day_idx:                int,
         avail_prob_arr:         np.ndarray = None, # [num_nodes, num_nodes]
         reward_global_p95:      float      = 1.0,
+        critic:                 nn.Module  = None,
+        value_coef:             float      = 1.0,
     ):
         """
         Rollout unificado con beam search para cualquier beam_width >= 1.
@@ -274,7 +276,24 @@ class AMRoutingAgent(nn.Module):
             if not next_beams:
                 break
 
-            next_beams.sort(key=lambda b: b["total_reward"], reverse=True)
+            if critic is not None:
+                def _score(b):
+                    if b["returned_home"]:
+                        v = 0.0
+                    else:
+                        v = self.estimate_value(
+                            critic, b["current_node"], start_node, b["visited_set"],
+                            b["time_elapsed"], step + 1,
+                            reward_matrix_penalized, time_matrix, distance_arr,
+                            max_duration, ltr_stack, trucks_stack, day_idx,
+                            avail_prob_arr=avail_prob_arr,
+                            reward_global_p95=reward_global_p95,
+                        )
+                    return b["total_reward"] + value_coef * v * REWARD_SCALE_FACTOR
+
+                next_beams.sort(key=_score, reverse=True)
+            else:
+                next_beams.sort(key=lambda b: b["total_reward"], reverse=True)
             beams = next_beams[:beam_width]
 
             if all(b["returned_home"] for b in beams):
@@ -326,6 +345,8 @@ class AMRoutingAgent(nn.Module):
         day_idx:                int        = 0,
         avail_prob_arr:         np.ndarray = None,   # [num_nodes, num_nodes]
         reward_global_p95:      float      = 1.0,
+        critic:                 nn.Module  = None,
+        value_coef:             float      = 1.0,
     ):
         """
         Rollout determinista (sin gradientes) con el modelo actual.
@@ -362,6 +383,7 @@ class AMRoutingAgent(nn.Module):
                 ltr_stack, trucks_stack, day_idx,
                 avail_prob_arr=avail_prob_arr,
                 reward_global_p95=reward_global_p95,
+                critic=critic, value_coef=value_coef,
             )
         finally:
             self.train()
@@ -382,6 +404,8 @@ class AMRoutingAgent(nn.Module):
         trucks_stack:      np.ndarray = None,   # [num_nodes, 120, 3]
         avail_prob_arr:    np.ndarray = None,   # [num_nodes, num_nodes]
         reward_global_p95: float      = 1.0,
+        critic:            nn.Module  = None,
+        value_coef:        float      = 1.0,
     ):
         """Beam search con días de mercado dinámicos y disponibilidad estocástica.
 
@@ -530,7 +554,27 @@ class AMRoutingAgent(nn.Module):
             if not next_beams:
                 break
 
-            next_beams.sort(key=lambda b: b["total_reward"], reverse=True)
+            if critic is not None:
+                def _score(b):
+                    if b["returned_home"]:
+                        v = 0.0
+                    else:
+                        b_day_offset = int(b["time_elapsed"] // 14)
+                        b_day_idx    = min(start_day_idx + b_day_offset, max_day)
+                        b_rm_day     = get_rm(b_day_idx)
+                        v = self.estimate_value(
+                            critic, b["current_node"], start_node, b["visited_set"],
+                            b["time_elapsed"], step + 1,
+                            b_rm_day, time_matrix, distance_arr,
+                            max_duration, ltr_stack, trucks_stack, b_day_idx,
+                            avail_prob_arr=avail_prob_arr,
+                            reward_global_p95=reward_global_p95,
+                        )
+                    return b["total_reward"] + value_coef * v * REWARD_SCALE_FACTOR
+
+                next_beams.sort(key=_score, reverse=True)
+            else:
+                next_beams.sort(key=lambda b: b["total_reward"], reverse=True)
             beams = next_beams[:beam_width]
 
             if all(b["returned_home"] for b in beams):

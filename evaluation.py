@@ -49,6 +49,8 @@ def rollout_drl_env(
     trucks_stack:   np.ndarray = None,
     avail_prob_arr: np.ndarray = None,
     beam_width:     int        = None,
+    critic                     = None,
+    value_coef:     float      = 1.0,
 ) -> tuple:
     """Beam search con días de mercado dinámicos.
 
@@ -64,6 +66,7 @@ def rollout_drl_env(
             ltr_stack=ltr_stack, trucks_stack=trucks_stack,
             avail_prob_arr=avail_prob_arr,
             beam_width=beam_width,
+            critic=critic, value_coef=value_coef,
         )
     finally:
         agent.train()
@@ -74,7 +77,7 @@ def run_solver_comparison(agent, time_matrix,
                            rate_stack, loads_stack, distance_arr, diesel_arr,
                            num_nodes,
                            ltr_stack=None, trucks_stack=None, avail_prob_arr=None,
-                           n_days_per_node=3):
+                           n_days_per_node=3, critic=None):
     """Run DRL Real + DRL Det + HGA-LNS + RH-Greedy for every start node.
 
     Para cada nodo de inicio se usan n_days_per_node días del set de evaluación
@@ -126,6 +129,7 @@ def run_solver_comparison(agent, time_matrix,
                 ltr_stack=ltr_stack, trucks_stack=trucks_stack,
                 avail_prob_arr=avail_prob_arr,
                 beam_width=get_beam_width_real(num_nodes),
+                critic=critic,
             )
             drl_real_times.append(time.time() - t0)
             drl_real_valid = drl_real_route is not None
@@ -147,6 +151,7 @@ def run_solver_comparison(agent, time_matrix,
                 time_matrix, rate_stack, loads_stack, distance_arr, diesel_arr,
                 ltr_stack=ltr_stack, trucks_stack=trucks_stack,
                 avail_prob_arr=None,   # sin Bernoulli → mundo determinista
+                critic=critic,
             )
             drl_det_valid = drl_det_route is not None
             if drl_det_valid:

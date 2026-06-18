@@ -89,8 +89,8 @@ def get_beam_width_det(num_nodes: int) -> int:
     Modelos pequeños necesitan más exploración en inferencia.
     Modelos grandes tienen políticas más robustas y beam=1 es suficiente."""
     if num_nodes <= 10: return 5    # modelo pequeño, necesita más exploración
-    if num_nodes <= 20: return 5   # validado empíricamente: gap bajó de ~20-29% a ~14-16% vs beam=5
-    if num_nodes <= 35: return 5   # balance costo/calidad
+    if num_nodes <= 20: return 7   # validado empíricamente: gap bajó de ~20-29% a ~14-16% vs beam=5
+    if num_nodes <= 35: return 7   # balance costo/calidad
     if num_nodes <= 50: return 8
     if num_nodes <= 75: return 4
     return 3                       # modelo grande, confiar en la política

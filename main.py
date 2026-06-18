@@ -53,6 +53,7 @@ from evaluation import (
 from stats_analysis import append_stats_sheets_to_excel
 from transfer_learning import build_agent_for_training
 from am_agent import AMRoutingAgent
+from critic_head import CriticHead
 from convergence_check import check_convergence, print_convergence_report, save_convergence_to_excel
 
 
@@ -98,11 +99,11 @@ def _run_am(
         {"agent": agent_am.state_dict(), "critic": critic.state_dict()},
         os.path.join(cwd, f"am_checkpoint_{NUM_NODES}nodes.pt"),
     )
-    return agent_am, ep_rewards, ep_losses, train_time, training_log
+    return agent_am, critic, ep_rewards, ep_losses, train_time, training_log
 
 
-def _load_agent(checkpoint_dir: str, num_nodes: int) -> "AMRoutingAgent":
-    """Carga un agente entrenado desde checkpoint sin reentrenar."""
+def _load_agent(checkpoint_dir: str, num_nodes: int) -> tuple:
+    """Carga agente + critic entrenados desde checkpoint sin reentrenar."""
     path = os.path.join(checkpoint_dir, f"am_checkpoint_{num_nodes}nodes.pt")
     if not os.path.exists(path):
         raise FileNotFoundError(f"Checkpoint no encontrado: {path}")
@@ -112,8 +113,11 @@ def _load_agent(checkpoint_dir: str, num_nodes: int) -> "AMRoutingAgent":
     )
     agent.load_state_dict(ckpt["agent"])
     agent.eval()
+    critic = CriticHead(AM_D_H).to(DEVICE)
+    critic.load_state_dict(ckpt["critic"])
+    critic.eval()
     print(f"Checkpoint cargado: {path}")
-    return agent
+    return agent, critic
 
 
 def _evaluate_and_report(
@@ -121,7 +125,7 @@ def _evaluate_and_report(
     distance_arr, diesel_arr, ep_rewards, ep_losses,
     train_time, summary_rows, cwd, label,
     ltr_stack=None, trucks_stack=None, avail_prob_arr=None,
-    n_days_per_node=1,
+    n_days_per_node=1, critic=None,
 ):
     """Comparación de solvers + resumen + guardado de archivos."""
     results_df, timing = run_solver_comparison(
@@ -131,6 +135,7 @@ def _evaluate_and_report(
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
         avail_prob_arr=avail_prob_arr,
         n_days_per_node=n_days_per_node,
+        critic=critic,
     )
 
     def avg_valid(col, valid_col):
@@ -255,7 +260,7 @@ def _evaluate_and_report(
 def main():
     # ── Cambia estos valores según lo que quieras hacer ───────────────────────
     NUM_NODES       = 35     # opciones: 10 · 20 · 35 · 50 · 75 · 100
-    EVAL_ONLY       = False   # True: carga checkpoint y salta entrenamiento
+    EVAL_ONLY       = True   # True: carga checkpoint y salta entrenamiento
     USE_TRANSFER    = False   # True: warm-start desde el checkpoint del tamaño anterior en
                               # NODE_SEQUENCE (requiere mismo AM_D_H/AM_N_LAYERS que la fuente).
                               # False: entrena desde pesos aleatorios con la arquitectura de config.py.
@@ -290,14 +295,14 @@ def main():
     conv_result = None
 
     if EVAL_ONLY:
-        agent_am  = _load_agent(checkpoint_dir, NUM_NODES)
+        agent_am, critic  = _load_agent(checkpoint_dir, NUM_NODES)
         ep_r, ep_l, t, training_log = [], [], 0.0, []
     else:
         agent_pretrained, critic_pretrained = build_agent_for_training(
             checkpoint_dir, NUM_NODES, use_transfer=USE_TRANSFER,
             d_h=AM_D_H, n_heads=AM_N_HEADS, n_layers=AM_N_LAYERS, d_ff=AM_D_FF,
         )
-        agent_am, ep_r, ep_l, t, training_log = _run_am(
+        agent_am, critic, ep_r, ep_l, t, training_log = _run_am(
             NUM_NODES, time_matrix, rate_train, loads_train,
             distance_arr, diesel_arr, checkpoint_dir,
             agent_pretrained, critic_pretrained,
@@ -329,6 +334,7 @@ def main():
         ltr_stack=ltr_stack, trucks_stack=trucks_stack,
         avail_prob_arr=avail_prob_arr,
         n_days_per_node=N_DAYS_PER_NODE,
+        critic=critic,
     )
 
     if conv_result is not None:
