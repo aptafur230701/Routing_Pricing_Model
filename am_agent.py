@@ -26,6 +26,9 @@ from attention_encoder import (
     build_node_features,
     build_market_features,
     build_temporal_features,
+    build_node_features_batch,
+    build_temporal_features_batch,
+    build_market_features_batch,
     N_NODE_FEATURES,
 )
 from attention_decoder import AttentionDecoder
@@ -563,6 +566,229 @@ class AMRoutingAgent(nn.Module):
             return None, -np.inf, np.inf
 
         return best_beam["route"], best_beam["total_reward"], best_beam["time_elapsed"]
+
+    @torch.no_grad()
+    def generate_route_sampling(
+        self,
+        start_node:        int,
+        start_day_idx:     int,
+        time_matrix,
+        rate_stack:        np.ndarray,
+        loads_stack:       np.ndarray,
+        distance_arr:      np.ndarray,
+        diesel_arr:        np.ndarray,
+        n_samples:         int,
+        max_duration:      float      = MAX_DURATION,
+        ltr_stack:         np.ndarray = None,   # [num_nodes, 120]
+        trucks_stack:      np.ndarray = None,   # [num_nodes, 120, 3]
+        avail_prob_arr:    np.ndarray = None,   # [num_nodes, num_nodes]
+        reward_global_p95: float      = 1.0,
+        temperature:       float      = 1.0,
+    ):
+        """Decodificación por muestreo: n_samples rollouts independientes.
+
+        Misma semántica de día dinámico, máscara y retorno forzado que
+        beam_search_dynamic (mismo manejo de over_budget, lane availability
+        y forced return). La diferencia es la selección de acción: en vez
+        de top-k determinista sobre los logits, cada muestra samplea de
+        Categorical(softmax(logits / temperature)) sobre los nodos válidos.
+
+        Los n_samples se vectorizan como batch B=n_samples en el encoder
+        (un solo forward por paso para todas las muestras), por lo que el
+        costo escala como pasos × forward(B=n_samples) en vez de
+        n_samples × pasos × forward(B=1).
+
+        Retorna la mejor ruta (por total_reward) entre las n_samples, con
+        la misma definición de validez que beam_search_dynamic: returned_home,
+        empieza y termina en start_node.
+
+        Retorna
+        -------
+        route        : list[int] | None
+        total_reward : float
+        time_elapsed : float
+        """
+        from problem_data import build_rm_pen_stack
+
+        self.eval()
+        B      = n_samples
+        N      = self.num_nodes
+        device = self.device
+
+        rm_pen_stack = build_rm_pen_stack(
+            rate_stack, loads_stack, distance_arr, diesel_arr
+        )   # (num_days, N, N) float32
+        max_day = rm_pen_stack.shape[0] - 1
+
+        time_matrix_arr = (
+            time_matrix.to_numpy(dtype=float)
+            if hasattr(time_matrix, "to_numpy")
+            else np.asarray(time_matrix, dtype=float)
+        )
+
+        start_node_arr = np.full(B, start_node, dtype=np.int64)
+        current_node   = np.full(B, start_node, dtype=np.int64)
+        time_elapsed   = np.zeros(B, dtype=np.float32)
+        step_count     = np.zeros(B, dtype=np.int64)
+        visited_mask   = np.zeros((B, N), dtype=bool)
+        visited_mask[:, start_node] = True
+        routes         = [[start_node] for _ in range(B)]
+        total_reward   = np.zeros(B, dtype=np.float64)
+        returned_home  = np.zeros(B, dtype=bool)
+        active         = np.ones(B, dtype=bool)
+
+        if avail_prob_arr is not None:
+            init_arrival_day = min(start_day_idx, max_day)
+            init_row = draw_lane_availability(
+                start_day_idx, start_node, init_arrival_day, avail_prob_arr, N,
+            )
+            lane_exists = np.tile(init_row, (B, 1))   # (B, N)
+        else:
+            lane_exists = None
+
+        non_start = np.arange(N)[None, :] != start_node_arr[:, None]   # (B, N), constant
+
+        for step in range(N):
+            if not active.any():
+                break
+
+            day_idx = np.minimum(
+                start_day_idx + (time_elapsed // 14).astype(np.int64), max_day
+            )   # (B,)
+
+            node_feats = build_node_features_batch(
+                current_node, start_node_arr, visited_mask,
+                rm_pen_stack, time_matrix_arr, distance_arr,
+                day_idx, N, max_duration,
+                trucks_stack_raw=trucks_stack,
+                avail_prob_arr=avail_prob_arr,
+                reward_global_p95=reward_global_p95,
+            )   # (B, N, 8)
+            temporal = build_temporal_features_batch(
+                time_elapsed, step_count, max_duration, N
+            )   # (B, 3)
+            market = (
+                build_market_features_batch(current_node, day_idx, ltr_stack)
+                if ltr_stack is not None
+                else np.zeros((B, 1), dtype=np.float32)
+            )   # (B, 1)
+
+            feats_t    = torch.from_numpy(node_feats).to(device)
+            temporal_t = torch.from_numpy(temporal).to(device)
+            market_t   = torch.from_numpy(market).to(device)
+
+            embeddings, graph_emb = self.encoder(feats_t)             # (B,N,d_h), (B,d_h)
+            check_tensor("generate_route_sampling embeddings", embeddings)
+            current_node_t = torch.from_numpy(current_node).to(device)
+            current_emb    = embeddings[torch.arange(B, device=device), current_node_t]
+            h_t = self.context_net(graph_emb, current_emb, temporal_t, market_t)
+
+            # ── Máscara: idéntica lógica a beam_search_dynamic, vectorizada ──
+            mask_np = np.ones((B, N), dtype=np.int8)
+            mask_np[np.arange(B), current_node] = 0                       # self-loop
+            mask_np[visited_mask & non_start] = 0                         # visitados
+
+            t_to_j      = time_matrix_arr[current_node, :]                # (B, N)
+            t_j_start   = time_matrix_arr[:, start_node_arr].T            # (B, N)
+            over_budget = (
+                time_elapsed[:, None] + t_to_j + t_j_start
+            ) > max_duration + 1e-6
+            mask_np[non_start & over_budget] = 0
+
+            if lane_exists is not None:
+                not_at_start = (current_node != start_node_arr)[:, None]
+                lane_absent  = (lane_exists == 0)
+                mask_np[not_at_start & lane_absent & non_start] = 0
+
+            valid_non_start_count = (mask_np * non_start).sum(axis=1)
+            not_at_start_flag     = current_node != start_node_arr
+            force_return = (valid_non_start_count == 0) & not_at_start_flag
+            stuck        = (mask_np.sum(axis=1) == 0)   # no valid action at all (dead end at depot)
+
+            # Garantizar al menos una posición válida por fila SOLO para evitar
+            # NaN en glimpse/softmax sobre filas inactivas/atascadas/forzadas;
+            # la decisión real para esas filas no depende de este forward.
+            mask_for_logits = mask_np.copy()
+            guard_rows = force_return | stuck | (~active)
+            mask_for_logits[guard_rows, start_node_arr[guard_rows]] = 1
+
+            mask_t    = torch.from_numpy(mask_for_logits).to(device)
+            bool_mask = (mask_t == 0)
+            logits    = self.decoder._logits(h_t, embeddings, bool_mask)   # (B, N)
+            logits    = logits / temperature
+            probs     = torch.softmax(logits, dim=-1)
+            probs     = torch.clamp(probs, min=1e-8)
+            dist      = torch.distributions.Categorical(probs=probs)
+            sampled   = dist.sample().cpu().numpy()                       # (B,)
+
+            next_node = np.where(force_return, start_node_arr, sampled)
+
+            step_time   = time_matrix_arr[current_node, next_node]
+            step_reward = rm_pen_stack[day_idx, current_node, next_node].astype(np.float64)
+            new_time_elapsed = time_elapsed + step_time
+            just_returned    = (next_node == start_node_arr) & active
+
+            update = active & ~stuck
+            for b in np.where(update)[0]:
+                routes[b].append(int(next_node[b]))
+            visited_mask[np.arange(B), next_node] = np.where(
+                update, True, visited_mask[np.arange(B), next_node]
+            )
+            current_node = np.where(update, next_node, current_node)
+            time_elapsed = np.where(update, new_time_elapsed, time_elapsed)
+            step_count   = np.where(update, step_count + 1, step_count)
+            total_reward = total_reward + np.where(update, step_reward, 0.0)
+            returned_home = returned_home | (just_returned & update)
+
+            if lane_exists is not None:
+                child_arrival_day = np.minimum(
+                    start_day_idx + (new_time_elapsed // 14).astype(np.int64), max_day
+                )
+                new_lane_rows = np.stack([
+                    draw_lane_availability(
+                        start_day_idx, int(next_node[b]), int(child_arrival_day[b]),
+                        avail_prob_arr, N,
+                    )
+                    for b in range(B)
+                ])
+                lane_exists = np.where(update[:, None], new_lane_rows, lane_exists)
+
+            active = active & update & ~returned_home
+
+        # ── Retorno forzado para muestras que no cerraron el ciclo ──────────
+        unfinished = np.where(~returned_home)[0]
+        if len(unfinished) > 0:
+            day_idx_final = np.minimum(
+                start_day_idx + (time_elapsed[unfinished] // 14).astype(np.int64), max_day
+            )
+            t_ret = time_matrix_arr[current_node[unfinished], start_node]
+            r_ret = rm_pen_stack[day_idx_final, current_node[unfinished], start_node]
+            feasible = time_elapsed[unfinished] + t_ret <= max_duration + 1e-6
+            for k, b in enumerate(unfinished):
+                if feasible[k] and current_node[b] != start_node:
+                    time_elapsed[b] += t_ret[k]
+                    total_reward[b] += r_ret[k]
+                    routes[b].append(start_node)
+                    returned_home[b] = True
+
+        best_idx    = None
+        best_reward = -np.inf
+        for b in range(B):
+            route = routes[b]
+            is_valid = (
+                returned_home[b]
+                and len(route) > 1
+                and route[0] == start_node
+                and route[-1] == start_node
+            )
+            if is_valid and total_reward[b] > best_reward:
+                best_reward = total_reward[b]
+                best_idx    = b
+
+        if best_idx is None:
+            return None, -np.inf, np.inf
+
+        return routes[best_idx], float(total_reward[best_idx]), float(time_elapsed[best_idx])
 
     @torch.no_grad()
     def greedy_action(
