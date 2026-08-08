@@ -7,10 +7,6 @@ ruteo estocástico con revelación post-decisión de disponibilidad de carga
 continuación para maximizar la recompensa acumulada (margen de flete) dentro
 de una ventana de duración máxima.
 
-Este README es la guía de la estructura del proyecto después de una limpieza
-(rama `clean-structure`) que eliminó scripts de debugging, tests puntuales y
-sweeps de tuning ya aplicados, dejando solo el pipeline del modelo y su
-validación final.
 
 ## Cómo correrlo
 
@@ -95,13 +91,6 @@ nodos, ver `NODE_SEQUENCE`).
 | [convergence_check.py](convergence_check.py) | Chequeo automático de convergencia del entrenamiento PPO (reward, explained variance, KL, entropía) sobre `training_log`. |
 | [stats_analysis.py](stats_analysis.py) | Robustez estadística: descriptivos + test de Wilcoxon pareado de DRL contra cada baseline estocástico. |
 
-Estos cuatro son los únicos módulos de análisis que sobrevivieron a la
-limpieza porque `main.py` los invoca como parte del pipeline de validación
-final. Todo lo demás que existía (sweeps de hiperparámetros de decodificación,
-diagnóstico de profundidad de lookahead, microbenchmarks de rendimiento,
-`pytest` de regresión puntual) fue exploración de una sola vez ya aplicada al
-modelo actual, y se eliminó — sigue disponible en el historial de git de las
-ramas anteriores si hace falta consultarlo.
 
 ### Datos y artefactos
 
@@ -132,4 +121,4 @@ ramas anteriores si hace falta consultarlo.
 ## Requisitos
 
 Ver [requirements.txt](requirements.txt). Entorno principal: PyTorch,
-Gymnasium, NumPy/Pandas, Optuna (tuning opcional), PuLP (solvers exactos).
+Gymnasium, NumPy/Pandas, Optuna, PuLP (solvers exactos).
