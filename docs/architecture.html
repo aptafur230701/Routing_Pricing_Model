@@ -1,0 +1,625 @@
+<title>Arquitectura AM-PPO</title>
+<meta name="description" content="Diagrama explicativo del pipeline AM-PPO: AttentionEncoder, ContextNetwork, AttentionDecoder, CriticHead y el loop de entrenamiento PPO." />
+<style>
+  :root{
+    --bg:      #12161c;
+    --panel:   #1a212a;
+    --panel-2: #212a34;
+    --ink:     #e9edf2;
+    --ink-dim: #8d9aa8;
+    --ink-dim2:#5f6b78;
+    --rule:    #2a3340;
+    --rule-strong: #384253;
+    --flow:    #4fa8d8;   /* encoder / backbone */
+    --flow-bg: rgba(79,168,216,0.10);
+    --actor:   #e3a64b;   /* decoder / actor */
+    --actor-bg:rgba(227,166,75,0.10);
+    --critic:  #6fbf95;   /* critic / value */
+    --critic-bg:rgba(111,191,149,0.10);
+    --loop:    #c98bd0;   /* ppo loop */
+    --loop-bg: rgba(201,139,208,0.10);
+    --radius: 10px;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"]{
+    --bg:      #f2f4f7;
+    --panel:   #ffffff;
+    --panel-2: #eaeef2;
+    --ink:     #171b21;
+    --ink-dim: #5b6672;
+    --ink-dim2:#7c8794;
+    --rule:    #d7dee5;
+    --rule-strong: #c2cbd4;
+    --flow:    #1e7fb0;
+    --flow-bg: rgba(30,127,176,0.08);
+    --actor:   #a5701b;
+    --actor-bg:rgba(165,112,27,0.08);
+    --critic:  #257a4b;
+    --critic-bg:rgba(37,122,75,0.08);
+    --loop:    #8a3f92;
+    --loop-bg: rgba(138,63,146,0.08);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --bg:      #f2f4f7;
+      --panel:   #ffffff;
+      --panel-2: #eaeef2;
+      --ink:     #171b21;
+      --ink-dim: #5b6672;
+      --ink-dim2:#7c8794;
+      --rule:    #d7dee5;
+      --rule-strong: #c2cbd4;
+      --flow:    #1e7fb0;
+      --flow-bg: rgba(30,127,176,0.08);
+      --actor:   #a5701b;
+      --actor-bg:rgba(165,112,27,0.08);
+      --critic:  #257a4b;
+      --critic-bg:rgba(37,122,75,0.08);
+      --loop:    #8a3f92;
+      --loop-bg: rgba(138,63,146,0.08);
+      color-scheme: light;
+    }
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:-apple-system,"Segoe UI","Helvetica Neue",Arial,sans-serif;
+    line-height:1.45;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono{
+    font-family:ui-monospace,"SF Mono","Cascadia Code","Consolas","Liberation Mono",monospace;
+  }
+
+  .page{
+    max-width:960px;
+    margin:0 auto;
+    padding:48px 24px 80px;
+  }
+
+  /* ── Header ─────────────────────────────────────────────── */
+  header{
+    margin-bottom:40px;
+  }
+  .eyebrow{
+    font-size:11.5px;
+    font-weight:600;
+    letter-spacing:0.12em;
+    text-transform:uppercase;
+    color:var(--flow);
+    margin:0 0 10px;
+  }
+  h1{
+    font-size:clamp(28px,4vw,38px);
+    font-weight:700;
+    letter-spacing:-0.01em;
+    margin:0 0 10px;
+    text-wrap:balance;
+  }
+  .subtitle{
+    color:var(--ink-dim);
+    font-size:15px;
+    max-width:62ch;
+    margin:0 0 24px;
+    text-wrap:pretty;
+  }
+
+  .legend{
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px 20px;
+    padding:14px 16px;
+    background:var(--panel);
+    border:1px solid var(--rule);
+    border-radius:var(--radius);
+  }
+  .legend-item{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    font-size:12.5px;
+    color:var(--ink-dim);
+  }
+  .swatch{
+    width:10px;height:10px;border-radius:2px;flex:none;
+  }
+
+  /* ── Pipeline shell ─────────────────────────────────────── */
+  .pipeline{
+    display:flex;
+    flex-direction:column;
+  }
+
+  .stage{
+    display:grid;
+    grid-template-columns:64px 1fr;
+    column-gap:16px;
+    padding:22px 0;
+  }
+  .stage + .stage{
+    border-top:1px dashed var(--rule);
+  }
+
+  .rail{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    padding-top:4px;
+  }
+  .rail-num{
+    font-size:11px;
+    font-weight:700;
+    color:var(--ink-dim2);
+    letter-spacing:0.05em;
+  }
+
+  .stage-head{
+    display:flex;
+    align-items:baseline;
+    gap:10px;
+    flex-wrap:wrap;
+    margin-bottom:14px;
+  }
+  .stage-title{
+    font-size:16px;
+    font-weight:700;
+    margin:0;
+  }
+  .stage-tag{
+    font-size:11px;
+    color:var(--ink-dim);
+  }
+  .stage-desc{
+    font-size:13.5px;
+    color:var(--ink-dim);
+    max-width:70ch;
+    margin:0 0 16px;
+  }
+
+  .cards-row{
+    display:flex;
+    align-items:stretch;
+    gap:10px;
+    flex-wrap:wrap;
+  }
+  .arrow{
+    display:flex;
+    align-items:center;
+    color:var(--ink-dim2);
+    font-size:16px;
+    padding:0 2px;
+  }
+
+  .card{
+    background:var(--panel);
+    border:1px solid var(--rule);
+    border-radius:var(--radius);
+    padding:12px 14px;
+    flex:1 1 180px;
+    min-width:150px;
+    transition:border-color .15s ease, transform .15s ease;
+  }
+  .card:hover{
+    border-color:var(--rule-strong);
+    transform:translateY(-1px);
+  }
+  .card-name{
+    font-size:13px;
+    font-weight:700;
+    margin:0 0 4px;
+  }
+  .card-detail{
+    font-size:12px;
+    color:var(--ink-dim);
+    margin:0;
+  }
+  .shape{
+    display:inline-block;
+    margin-top:8px;
+    font-size:11px;
+    padding:2px 6px;
+    border-radius:5px;
+    background:var(--panel-2);
+    color:var(--ink-dim);
+  }
+
+  .card.flow{  border-color:color-mix(in srgb, var(--flow) 45%, var(--rule));   background:var(--flow-bg); }
+  .card.actor{ border-color:color-mix(in srgb, var(--actor) 45%, var(--rule));  background:var(--actor-bg); }
+  .card.critic{border-color:color-mix(in srgb, var(--critic) 45%, var(--rule));background:var(--critic-bg); }
+  .card.loop{  border-color:color-mix(in srgb, var(--loop) 45%, var(--rule));   background:var(--loop-bg); }
+
+  .card.flow  .card-name{color:var(--flow);}
+  .card.actor .card-name{color:var(--actor);}
+  .card.critic .card-name{color:var(--critic);}
+  .card.loop  .card-name{color:var(--loop);}
+
+  /* feature chip list */
+  .chips{
+    display:flex;
+    flex-wrap:wrap;
+    gap:6px;
+    margin-top:8px;
+  }
+  .chip{
+    font-size:11px;
+    padding:3px 8px;
+    border-radius:20px;
+    background:var(--panel-2);
+    border:1px solid var(--rule);
+    color:var(--ink-dim);
+  }
+
+  /* fork layout for actor/critic */
+  .fork{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:18px;
+  }
+  @media (max-width:640px){
+    .fork{grid-template-columns:1fr;}
+    .stage{grid-template-columns:1fr;}
+    .rail{display:none;}
+  }
+  .fork-col h3{
+    font-size:12.5px;
+    text-transform:uppercase;
+    letter-spacing:0.06em;
+    margin:0 0 10px;
+  }
+  .fork-col.actor-col h3{color:var(--actor);}
+  .fork-col.critic-col h3{color:var(--critic);}
+  .fork-col .cards-row{flex-direction:column;}
+  .fork-col .arrow{transform:rotate(90deg); justify-content:center; padding:2px 0;}
+
+  .hjoin{
+    display:flex;
+    justify-content:center;
+    margin:2px 0 14px;
+    color:var(--ink-dim2);
+    font-size:12px;
+  }
+
+  /* PPO loop */
+  .loop-wrap{
+    display:flex;
+    align-items:center;
+    gap:0;
+    flex-wrap:wrap;
+  }
+  .loop-svg{
+    width:100%;
+    max-width:640px;
+    height:auto;
+    margin-top:6px;
+    display:block;
+  }
+  .loop-svg path.ring{
+    fill:none;
+    stroke:var(--loop);
+    stroke-width:1.6;
+    opacity:0.55;
+  }
+  @media (prefers-reduced-motion: no-preference){
+    .loop-svg path.ring{
+      stroke-dasharray:6 5;
+      animation:dash 22s linear infinite;
+    }
+  }
+  @keyframes dash{ to{ stroke-dashoffset:-220; } }
+
+  .hyperparams{
+    display:flex;
+    flex-wrap:wrap;
+    gap:6px 14px;
+    margin-top:12px;
+    font-size:11.5px;
+    color:var(--ink-dim);
+  }
+  .hyperparams span b{
+    color:var(--ink);
+    font-weight:600;
+  }
+
+  /* Footer / inference modes */
+  footer{
+    margin-top:44px;
+    padding-top:24px;
+    border-top:1px solid var(--rule);
+  }
+  footer h2{
+    font-size:13px;
+    text-transform:uppercase;
+    letter-spacing:0.08em;
+    color:var(--ink-dim);
+    margin:0 0 14px;
+    font-weight:700;
+  }
+  .modes{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:12px;
+  }
+  .mode{
+    background:var(--panel);
+    border:1px solid var(--rule);
+    border-radius:var(--radius);
+    padding:12px 14px;
+  }
+  .mode-name{
+    font-size:12.5px;
+    font-weight:700;
+    margin:0 0 4px;
+  }
+  .mode-detail{
+    font-size:12px;
+    color:var(--ink-dim);
+    margin:0;
+  }
+
+  .src-note{
+    margin-top:28px;
+    font-size:11.5px;
+    color:var(--ink-dim2);
+  }
+  .src-note code{
+    font-family:ui-monospace,"SF Mono","Cascadia Code",monospace;
+    background:var(--panel-2);
+    padding:1px 5px;
+    border-radius:4px;
+  }
+</style>
+
+<div class="page">
+
+  <header>
+    <p class="eyebrow">Routing &amp; Pricing Model — arquitectura de agente</p>
+    <h1>AM&#8202;·&#8202;PPO — Attention Model entrenado con Proximal Policy Optimization</h1>
+    <p class="subtitle">
+      Un encoder Transformer construye embeddings del grafo de nodos; un vector de contexto
+      h<sub>t</sub> alimenta dos cabezas — un pointer decoder (actor) y un MLP de valor (critic) —
+      que se entrenan conjuntamente con PPO-Clip sobre rollouts de ruteo.
+    </p>
+    <div class="legend">
+      <div class="legend-item"><span class="swatch" style="background:var(--flow)"></span>Encoder / backbone compartido</div>
+      <div class="legend-item"><span class="swatch" style="background:var(--actor)"></span>Actor — AttentionDecoder</div>
+      <div class="legend-item"><span class="swatch" style="background:var(--critic)"></span>Critic — CriticHead</div>
+      <div class="legend-item"><span class="swatch" style="background:var(--loop)"></span>Loop de entrenamiento PPO</div>
+    </div>
+  </header>
+
+  <div class="pipeline">
+
+    <!-- Stage 1 — Input -->
+    <section class="stage">
+      <div class="rail"><span class="rail-num mono">01</span></div>
+      <div>
+        <div class="stage-head">
+          <h2 class="stage-title">Features de entrada</h2>
+          <span class="stage-tag mono">por paso de decisión, para los N nodos</span>
+        </div>
+        <p class="stage-desc">
+          En cada paso se reconstruyen tres bloques de features desde la posición actual del camión.
+          Todo se recalcula por paso — no hay estado recurrente entre pasos.
+        </p>
+        <div class="cards-row">
+          <div class="card flow" style="flex:2 1 320px">
+            <p class="card-name">Node features · 8 por nodo</p>
+            <div class="chips">
+              <span class="chip">reward_norm</span>
+              <span class="chip">time_norm</span>
+              <span class="chip">dist_norm</span>
+              <span class="chip">is_depot</span>
+              <span class="chip">visited</span>
+              <span class="chip">trucks_norm</span>
+              <span class="chip">avail_prior</span>
+              <span class="chip">reward_abs</span>
+            </div>
+            <span class="shape mono">(1, N, 8)</span>
+          </div>
+          <div class="card flow">
+            <p class="card-name">Temporal · 3</p>
+            <div class="chips">
+              <span class="chip">elapsed_norm</span>
+              <span class="chip">remaining_norm</span>
+              <span class="chip">progress</span>
+            </div>
+            <span class="shape mono">(1, 3)</span>
+          </div>
+          <div class="card flow">
+            <p class="card-name">Market · 1</p>
+            <div class="chips"><span class="chip">ltr_norm</span></div>
+            <span class="shape mono">(1, 1)</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Stage 2 — Encoder -->
+    <section class="stage">
+      <div class="rail"><span class="rail-num mono">02</span></div>
+      <div>
+        <div class="stage-head">
+          <h2 class="stage-title">AttentionEncoder</h2>
+          <span class="stage-tag mono">attention_encoder.py</span>
+        </div>
+        <p class="stage-desc">
+          Transformer encoder estándar. Proyecta las 8 features de nodo a d<sub>h</sub>=128 y las pasa
+          por 3 capas de self-attention; el promedio sobre nodos da el embedding global del grafo.
+        </p>
+        <div class="cards-row">
+          <div class="card flow">
+            <p class="card-name">NodeFeatureProjection</p>
+            <p class="card-detail">Linear(8→128) + ReLU + LayerNorm</p>
+          </div>
+          <div class="arrow">→</div>
+          <div class="card flow" style="flex:1.4 1 220px">
+            <p class="card-name">TransformerEncoderLayer × 3</p>
+            <p class="card-detail">MHA (8 heads) + FFN(512), pre-norm, residual</p>
+          </div>
+          <div class="arrow">→</div>
+          <div class="card flow">
+            <p class="card-name">LayerNorm final</p>
+            <p class="card-detail">node embeddings + graph embedding (mean-pool)</p>
+            <span class="shape mono">(1,N,128) · (1,128)</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Stage 3 — Context -->
+    <section class="stage">
+      <div class="rail"><span class="rail-num mono">03</span></div>
+      <div>
+        <div class="stage-head">
+          <h2 class="stage-title">ContextNetwork — vector h<sub>t</sub></h2>
+          <span class="stage-tag mono">attention_encoder.py · ContextNetwork</span>
+        </div>
+        <p class="stage-desc">
+          Concatena el embedding global, el embedding del nodo actual, las features temporales
+          y de mercado, y las proyecta a un único vector de contexto compartido por ambas cabezas.
+        </p>
+        <div class="cards-row">
+          <div class="card flow" style="flex:1 1 100%">
+            <p class="card-name">MLP de contexto</p>
+            <p class="card-detail">
+              [graph_emb ⊕ current_node_emb ⊕ temporal(3) ⊕ market(1)] → Linear(259→128) → ReLU →
+              Linear(128→128) → LayerNorm
+            </p>
+            <span class="shape mono">h_t : (1, 128)</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Stage 4 — Actor / Critic fork -->
+    <section class="stage">
+      <div class="rail"><span class="rail-num mono">04</span></div>
+      <div>
+        <div class="stage-head">
+          <h2 class="stage-title">Dos cabezas sobre h<sub>t</sub></h2>
+          <span class="stage-tag mono">attention_decoder.py · critic_head.py</span>
+        </div>
+        <p class="stage-desc">
+          h<sub>t</sub> y los embeddings de nodo alimentan en paralelo al actor (decide el siguiente
+          nodo) y al critic (estima el valor del estado). Comparten backbone, no pesos.
+        </p>
+        <div class="fork">
+          <div class="fork-col actor-col">
+            <h3 class="mono">Actor</h3>
+            <div class="cards-row">
+              <div class="card actor">
+                <p class="card-name">GlimpseAttention</p>
+                <p class="card-detail">cross-attention h_t → node embeddings (8 heads)</p>
+              </div>
+              <div class="arrow">↓</div>
+              <div class="card actor">
+                <p class="card-name">PointerAttention</p>
+                <p class="card-detail">compatibilidad dot-product, clip C·tanh(·), C=10</p>
+              </div>
+              <div class="arrow">↓</div>
+              <div class="card actor">
+                <p class="card-name">Máscara + softmax</p>
+                <p class="card-detail">nodos inválidos → −∞ · Categorical(π)</p>
+                <span class="shape mono">a_t, log π(a_t|s_t), H</span>
+              </div>
+            </div>
+          </div>
+          <div class="fork-col critic-col">
+            <h3 class="mono">Critic</h3>
+            <div class="cards-row">
+              <div class="card critic">
+                <p class="card-name">CriticHead MLP</p>
+                <p class="card-detail">Linear(128→128) → ReLU → Linear(128→64) → ReLU</p>
+              </div>
+              <div class="arrow">↓</div>
+              <div class="card critic">
+                <p class="card-name">Linear(64→1)</p>
+                <p class="card-detail">sin activación final — admite valores negativos</p>
+                <span class="shape mono">V(s_t) : escalar</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Stage 5 — PPO loop -->
+    <section class="stage">
+      <div class="rail"><span class="rail-num mono">05</span></div>
+      <div>
+        <div class="stage-head">
+          <h2 class="stage-title">Loop de entrenamiento PPO</h2>
+          <span class="stage-tag mono">am_training.py · run_am_training()</span>
+        </div>
+        <p class="stage-desc">
+          Ciclo iterativo: recolecta rollouts con la política actual, calcula ventajas con GAE,
+          y actualiza actor y critic con la pérdida PPO-Clip antes de volver a recolectar.
+        </p>
+        <div class="cards-row">
+          <div class="card loop">
+            <p class="card-name">Rollout</p>
+            <p class="card-detail">act_with_value() × 700 episodios/update</p>
+          </div>
+          <div class="arrow">→</div>
+          <div class="card loop">
+            <p class="card-name">GAE</p>
+            <p class="card-detail">A_t, R_t por episodio</p>
+          </div>
+          <div class="arrow">→</div>
+          <div class="card loop">
+            <p class="card-name">PPO-Clip loss</p>
+            <p class="card-detail">min(surr1, surr2) − H·coef + MSE(V,R)</p>
+          </div>
+          <div class="arrow">→</div>
+          <div class="card loop">
+            <p class="card-name">AdamW × 2</p>
+            <p class="card-detail">actor + critic, 4 épocas, batch 256</p>
+          </div>
+        </div>
+
+        <svg class="loop-svg" viewBox="0 0 640 60" aria-hidden="true">
+          <path class="ring" d="M 40 30 H 560 M 560 30 a 20 20 0 0 1 -20 20 M 540 50 H 60 M 60 50 a 20 20 0 0 1 -20 -20 M 40 30 V 30" />
+          <path d="M 44 24 L 34 30 L 44 36 Z" fill="var(--loop)" opacity="0.55"/>
+        </svg>
+
+        <div class="hyperparams mono">
+          <span>γ = <b>0.99</b></span>
+          <span>λ (GAE) = <b>0.95</b></span>
+          <span>clip ε = <b>0.15</b></span>
+          <span>entropy_coef = <b>0.08 → 0.02</b> (decay lineal)</span>
+          <span>grad_clip = <b>0.5</b></span>
+          <span>lr actor = <b>3e-5</b> (AdamW, wd 1e-4)</span>
+          <span>lr critic ≈ <b>10×</b> lr actor</span>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <footer>
+    <h2>Modos de inferencia (post-entrenamiento)</h2>
+    <div class="modes">
+      <div class="mode">
+        <p class="mode-name">generate_route · beam determinista</p>
+        <p class="mode-detail">beam_width según tamaño de grafo (get_beam_width) — sin gradientes, argmax sobre logits.</p>
+      </div>
+      <div class="mode">
+        <p class="mode-name">beam_search_dynamic</p>
+        <p class="mode-detail">igual, con días de mercado dinámicos y disponibilidad estocástica de lanes.</p>
+      </div>
+      <div class="mode">
+        <p class="mode-name">generate_route_sampling</p>
+        <p class="mode-detail">B rollouts en paralelo, Categorical(softmax(logits/T)) — se conserva el mejor.</p>
+      </div>
+    </div>
+    <p class="src-note">
+      Fuentes: <code>am_agent.py</code>, <code>attention_encoder.py</code>, <code>attention_decoder.py</code>,
+      <code>critic_head.py</code>, <code>am_training.py</code>, <code>config.py</code>.
+    </p>
+  </footer>
+
+</div>

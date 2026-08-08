@@ -38,9 +38,6 @@ import torch
 
 warnings.filterwarnings("ignore")
 
-import sys
-print(sys.executable)
-
 from config import (
     SEED, DEVICE,
     get_episodes_per_node, TRAIN_DAYS,
@@ -259,9 +256,9 @@ def _evaluate_and_report(
 
 def main():
     # ── Cambia estos valores según lo que quieras hacer ───────────────────────
-    NUM_NODES       = 10     # opciones: 10 · 20 · 35 · 50 · 75 · 100
+    NUM_NODES       = 20     # opciones: 10 · 20 · 35 · 50 · 75 · 100
     EVAL_ONLY       = False   # True: carga checkpoint y salta entrenamiento
-    USE_TRANSFER    = False   # True: warm-start desde el checkpoint del tamaño anterior en
+    USE_TRANSFER    = True   # True: warm-start desde el checkpoint del tamaño anterior en
                               # NODE_SEQUENCE (requiere mismo AM_D_H/AM_N_LAYERS que la fuente).
                               # False: entrena desde pesos aleatorios con la arquitectura de config.py.
     N_DAYS_PER_NODE = 3      # días de evaluación por nodo (1 = comportamiento original)
@@ -276,7 +273,7 @@ def main():
 
     set_seeds(SEED)
 
-    output_dir = os.path.join(cwd, f"results_{NUM_NODES}nodes")
+    output_dir = os.path.join(cwd, "results", f"{NUM_NODES}nodes")
     os.makedirs(output_dir, exist_ok=True)
 
     # Carpeta compartida de checkpoints (para transfer learning entre ramas)

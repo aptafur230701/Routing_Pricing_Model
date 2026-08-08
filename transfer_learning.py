@@ -52,7 +52,7 @@ def get_source_checkpoint(base_dir: str, target_num_nodes: int) -> str | None:
     Dado el tamaño destino, devuelve la ruta al checkpoint del tamaño
     anterior en NODE_SEQUENCE, o None si target es el primero (10 nodos).
 
-    Busca primero en results_{N}nodes/ y luego en la raíz del proyecto.
+    Busca primero en results/{N}nodes/ y luego en la raíz del proyecto.
 
     Parámetros
     ----------
@@ -78,11 +78,11 @@ def get_source_checkpoint(base_dir: str, target_num_nodes: int) -> str | None:
     source_nodes = NODE_SEQUENCE[idx - 1]
     fname = f"am_checkpoint_{source_nodes}nodes.pt"
 
-    # Buscar: 1) carpeta compartida checkpoints/  2) results_Nnodes/  3) raíz
+    # Buscar: 1) carpeta compartida checkpoints/  2) results/Nnodes/  3) raíz
     candidates = [
         os.path.join(base_dir, fname),
         os.path.join(os.path.dirname(base_dir), "checkpoints", fname),
-        os.path.join(base_dir, f"results_{source_nodes}nodes", fname),
+        os.path.join(base_dir, "results", f"{source_nodes}nodes", fname),
         os.path.join(base_dir, fname),
     ]
     # eliminar duplicados manteniendo orden
@@ -212,7 +212,7 @@ def build_agent_for_training(
 
     Parámetros
     ----------
-    base_dir     : directorio raíz del proyecto (donde están results_Nnodes/).
+    base_dir     : directorio raíz del proyecto (donde están results/Nnodes/).
     num_nodes    : tamaño del grafo a entrenar.
     use_transfer : activar/desactivar transfer learning.
 
@@ -257,7 +257,7 @@ def verify_chain(base_dir: str):
     for i, n in enumerate(NODE_SEQUENCE):
         # Buscar checkpoint de este tamaño
         candidates = [
-            os.path.join(base_dir, f"results_{n}nodes", f"am_checkpoint_{n}nodes.pt"),
+            os.path.join(base_dir, "results", f"{n}nodes", f"am_checkpoint_{n}nodes.pt"),
             os.path.join(base_dir, f"am_checkpoint_{n}nodes.pt"),
         ]
         exists = next((p for p in candidates if os.path.exists(p)), None)
